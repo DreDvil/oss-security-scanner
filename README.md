@@ -2,7 +2,7 @@
 
 Automated security scanner for open source GitHub repositories. Runs three independent checks — **VirusTotal**, **Semgrep**, and **Trivy** — entirely via Docker. No local installations required beyond Docker, Git, curl, and jq.
 
-Generates a self-contained **HTML report** with a color-coded verdict (PASS / WARN / FAIL) for each check.
+Generates a self-contained **HTML report** and **PDF report** with a color-coded verdict (PASS / WARN / FAIL) for each check.
 
 ---
 
@@ -17,7 +17,10 @@ Generates a self-contained **HTML report** with a color-coded verdict (PASS / WA
 - Scan any public GitHub repository by URL
 - Pin to a specific release tag or branch with `--release`
 - Skip individual scanners with `--no-vt`, `--no-semgrep`, `--no-trivy`
-- HTML report with module cards, severity tables, and raw JSON links
+- **HTML + PDF reports** — both generated automatically after each scan
+- Report language: **English** and **Russian** (`--lang ru`)
+- Clickable GitHub links in findings tables — jump directly to the vulnerable line
+- Row numbering in Semgrep findings table
 - Report is always generated — even if a scanner fails mid-run
 
 ---
@@ -53,6 +56,9 @@ echo "VT_API_KEY=your_key_here" >> .env
 # Scan a specific release tag
 ./check.sh https://github.com/owner/repo --release v2.4.0
 
+# Report in Russian
+./check.sh https://github.com/owner/repo --lang ru
+
 # Skip VirusTotal (no API key)
 ./check.sh https://github.com/owner/repo --no-vt
 
@@ -68,6 +74,7 @@ VT_API_KEY=xxx ./check.sh https://github.com/sigstore/cosign --release v2.2.4
 | Flag | Description |
 |---|---|
 | `--release TAG` | Scan a specific tag or branch (default: HEAD) |
+| `--lang LANG` | Report language: `en` (default) or `ru` |
 | `--no-vt` | Skip VirusTotal scan |
 | `--no-semgrep` | Skip Semgrep scan |
 | `--no-trivy` | Skip Trivy scan |
@@ -78,6 +85,7 @@ VT_API_KEY=xxx ./check.sh https://github.com/sigstore/cosign --release v2.2.4
 | Variable | Description |
 |---|---|
 | `VT_API_KEY` | VirusTotal API key — can also be set in `.env` |
+| `LANG_REPORT` | Report language (`en` or `ru`) |
 
 ---
 
@@ -99,7 +107,8 @@ check.sh https://github.com/owner/repo
     ├─ 🛡️ Trivy
     │     └─ docker run aquasec/trivy fs --scanners vuln,secret,misconfig
     │
-    └─ 📄 Generate reports/YYYYMMDD_HHMMSS_<repo>[_tag]/report.html
+    ├─ 📄 Generate reports/.../report.html
+    └─ 📑 Generate reports/.../report.pdf  (WeasyPrint, built from Dockerfile.pdf)
 ```
 
 ### Verdict logic
@@ -116,8 +125,9 @@ check.sh https://github.com/owner/repo
 
 ```
 reports/
-└── 20260314_113100_owner_repo_v2.4.0/
+└── 20260319_195100_owner_repo_v2.4.0/
     ├── report.html       ← main report (open in browser)
+    ├── report.pdf        ← PDF export
     ├── semgrep.json
     ├── trivy_fs.json
     └── virustotal.txt
@@ -131,18 +141,34 @@ xdg-open reports/*/report.html      # Linux
 
 ---
 
-## VirusTotal — first run
+## Report highlights
 
-The `vt-cli` binary is built automatically from `Dockerfile.vt` on the first run (takes ~1–2 minutes). Subsequent runs use the cached Docker image.
+- **Dark theme** with module cards per scanner
+- **Semgrep table**: numbered rows, clickable GitHub links to exact lines (`file.ts#L42`)
+- **Trivy secrets**: file links pointing directly to the affected file in the repo
+- **Responsive layout** — adapts to any screen width
+- **Local timezone** displayed in report header and footer
+
+---
+
+## Docker images (auto-built on first run)
+
+| Image | Dockerfile | Purpose |
+|---|---|---|
+| `vt-cli:local` | `Dockerfile.vt` | VirusTotal CLI (Go binary) |
+| `weasyprint-pdf:local` | `Dockerfile.pdf` | HTML → PDF export |
+
+Both images are built automatically on first use (~1–3 min each) and cached by Docker for subsequent runs.
 
 ---
 
 ## Notes
 
 - **VirusTotal free tier**: 4 requests/min, 500 req/day. Large repos (>650 MB archive) are skipped automatically.
-- **Semgrep**: Dockerfiles are excluded from analysis to avoid false positives.
+- **Semgrep**: Dockerfiles are excluded from analysis to avoid false positives. Uses `--config=auto` with fallback to bundled `p/default`.
 - **Trivy**: Fetches the latest vulnerability database on each run.
 - All scanners run independently — a failure in one does not stop others.
+- PDF generation requires building `weasyprint-pdf:local` on first run. Includes Noto fonts for full Unicode/Cyrillic support.
 
 ---
 

@@ -27,6 +27,8 @@ TARGET_REF=""    # specific tag/branch to scan (empty = default branch HEAD)
 WORK_DIR=""
 REPORT_DIR=""
 VT_API_KEY="${VT_API_KEY:-}"
+LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
+PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
 
 # Result variables (set by each scanner)
 SEMGREP_STATUS="skipped"; SEMGREP_FINDINGS=0; SEMGREP_ERRORS=0
@@ -51,9 +53,11 @@ ${BOLD}Options:${NC}
   --no-trivy      Skip Trivy scan
   --no-vt         Skip VirusTotal scan
   --vt-key KEY    VirusTotal API key (overrides VT_API_KEY env)
+  --lang LANG     Report language: en (default) or ru
 
 ${BOLD}Environment:${NC}
   VT_API_KEY      VirusTotal API key (free tier: 4 req/min)
+  LANG_REPORT     Report language (en or ru)
 EOF
   exit 1
 }
@@ -376,13 +380,17 @@ overall_status() {
 }
 
 semgrep_rows_html() {
+  # $1 = gh_repo (owner/repo), $2 = ref (tag or HEAD)
   [[ ! -s "$REPORT_DIR/semgrep.json" ]] && return
-  jq -r '.results[:50][] |
+  local base="https://github.com/${1}/blob/${2}"
+  jq -r --arg base "$base" '
+    .results[:50] | to_entries[] | .key as $i | .value |
     "<tr>
+      <td class=\"num\">\($i + 1)</td>
       <td class=\"sev-\(.extra.severity | ascii_downcase)\">\(.extra.severity // "?")</td>
-      <td><code>\(.check_id)</code></td>
-      <td>\(.path):\(.start.line)</td>
-      <td>\(.extra.message | gsub("<";"&lt;") | gsub(">";"&gt;") | .[0:120])</td>
+      <td><code class=\"rule-id\">\(.check_id)</code></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/"))#L\(.start.line)\" target=\"_blank\" class=\"loc-link\">\(.path | ltrimstr("/src/")):\(.start.line)</a></td>
+      <td class=\"desc-cell\">\(.extra.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/semgrep.json" 2>/dev/null || true
 }
 
@@ -399,12 +407,16 @@ trivy_rows_html() {
 }
 
 trivy_secrets_html() {
+  # $1 = gh_repo (owner/repo), $2 = ref (tag or HEAD)
   [[ ! -s "$REPORT_DIR/trivy_fs.json" ]] && return
-  jq -r '.Results[]? | .Secrets[]? |
+  local base="https://github.com/${1}/blob/${2}"
+  jq -r --arg base "$base" '
+    .Results[]? | . as $r | .Secrets[]? |
     "<tr>
       <td class=\"sev-\(.Severity | ascii_downcase)\">\(.Severity)</td>
       <td>\(.Title | gsub("<";"&lt;"))</td>
-      <td><code>\(.Match | gsub("<";"&lt;") | .[0:80])</code></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target)\" target=\"_blank\" class=\"loc-link\">\($r.Target)</a></td>
+      <td class=\"desc-cell\"><code>\(.Match | gsub("<";"&lt;") | .[0:120])</code></td>
     </tr>"' "$REPORT_DIR/trivy_fs.json" 2>/dev/null || true
 }
 
@@ -423,26 +435,148 @@ vt_stats_html() {
   done
 }
 
+# ── Translations ──────────────────────────────────────────────────────────────
+setup_lang() {
+  if [[ "$LANG_REPORT" == "ru" ]]; then
+    T_REPORT_TITLE="Отчёт о безопасности"
+    T_LABEL_TARGET="Репозиторий"
+    T_LABEL_REF="Версия"
+    T_LABEL_DATE="Дата"
+    T_VT_LABEL="VirusTotal"
+    T_VT_MALICIOUS_SUB="вредоносных / ${VT_TOTAL} движков"
+    T_SEMGREP_LABEL="Semgrep"
+    T_SEMGREP_SUB="проблем в коде"
+    T_TRIVY_LABEL="Trivy"
+    T_TRIVY_SUB="критических / высоких"
+    T_TRIVY_MED="ср"
+    T_TRIVY_LOW="низ"
+    T_VT_MODULE_TITLE="VirusTotal"
+    T_SEMGREP_MODULE_TITLE="Semgrep — Статический анализ"
+    T_TRIVY_MODULE_TITLE="Trivy — Зависимости и секреты"
+    T_VT_SKIPPED="Пропущено — укажите <code>VT_API_KEY</code> в <code>.env</code> или через <code>--vt-key</code>"
+    T_VT_TOO_LARGE="Пропущено — архив &gt; 650 МБ"
+    T_VT_ERROR="Ошибка — проверьте API-ключ или пересоберите образ vt-cli"
+    T_VT_TH_CATEGORY="Категория"
+    T_VT_TH_COUNT="Кол-во"
+    T_VT_RAW="Сырой вывод vt-cli"
+    T_SEMGREP_CLEAN="✓ Проблем не найдено"
+    T_SEMGREP_ERROR="Ошибка сканера — проверьте логи Docker"
+    T_SEMGREP_FINDINGS_LABEL="найдено (показаны первые 50)"
+    T_SEMGREP_TH_SEV="Серьёзность"
+    T_SEMGREP_TH_RULE="Правило"
+    T_SEMGREP_TH_LOC="Расположение"
+    T_SEMGREP_TH_MSG="Описание"
+    T_TRIVY_CLEAN="✓ Критических проблем не найдено"
+    T_TRIVY_ERROR="Ошибка сканера — проверьте логи Docker"
+    T_TRIVY_VULN_LABEL="Уязвимости"
+    T_TRIVY_TH_SEV="Серьёзность"
+    T_TRIVY_TH_CVE="CVE"
+    T_TRIVY_TH_PKG="Пакет"
+    T_TRIVY_TH_FIX="Исправление"
+    T_TRIVY_TH_TITLE="Название"
+    T_TRIVY_SECRETS_LABEL="секрет(ов) обнаружено в исходниках"
+    T_TRIVY_TH_TYPE="Тип"
+    T_TRIVY_TH_FILE="Файл"
+    T_TRIVY_TH_MATCH="Совпадение"
+    T_RAW_JSON="Сырые данные JSON"
+    T_VERDICT_PASS="Все проверки пройдены — критических угроз не обнаружено"
+    T_VERDICT_WARN="Обнаружены некритические проблемы, требующие проверки"
+    T_VERDICT_FAIL="Обнаружены критические угрозы — вредоносный код, критические CVE или секреты"
+    T_FOOTER_GENERATED="Сформировано"
+  else
+    T_REPORT_TITLE="Security Scan Report"
+    T_LABEL_TARGET="Target"
+    T_LABEL_REF="Ref"
+    T_LABEL_DATE="Date"
+    T_VT_LABEL="VirusTotal"
+    T_VT_MALICIOUS_SUB="malicious / ${VT_TOTAL} engines"
+    T_SEMGREP_LABEL="Semgrep"
+    T_SEMGREP_SUB="code findings"
+    T_TRIVY_LABEL="Trivy"
+    T_TRIVY_SUB="critical / high"
+    T_TRIVY_MED="med"
+    T_TRIVY_LOW="low"
+    T_VT_MODULE_TITLE="VirusTotal"
+    T_SEMGREP_MODULE_TITLE="Semgrep — Static Analysis"
+    T_TRIVY_MODULE_TITLE="Trivy — Dependencies &amp; Secrets"
+    T_VT_SKIPPED="Skipped — set <code>VT_API_KEY</code> in <code>.env</code> or use <code>--vt-key</code>"
+    T_VT_TOO_LARGE="Skipped — archive &gt; 650 MB"
+    T_VT_ERROR="Error — check API key or rebuild vt-cli image"
+    T_VT_TH_CATEGORY="Category"
+    T_VT_TH_COUNT="Count"
+    T_VT_RAW="Raw vt-cli output"
+    T_SEMGREP_CLEAN="✓ No findings"
+    T_SEMGREP_ERROR="Scanner error — check Docker logs"
+    T_SEMGREP_FINDINGS_LABEL="finding(s) — showing up to 50"
+    T_SEMGREP_TH_SEV="Severity"
+    T_SEMGREP_TH_RULE="Rule"
+    T_SEMGREP_TH_LOC="Location"
+    T_SEMGREP_TH_MSG="Message"
+    T_TRIVY_CLEAN="✓ No critical issues"
+    T_TRIVY_ERROR="Scanner error — check Docker logs"
+    T_TRIVY_VULN_LABEL="Vulnerabilities"
+    T_TRIVY_TH_SEV="Severity"
+    T_TRIVY_TH_CVE="CVE"
+    T_TRIVY_TH_PKG="Package"
+    T_TRIVY_TH_FIX="Fix"
+    T_TRIVY_TH_TITLE="Title"
+    T_TRIVY_SECRETS_LABEL="secret(s) detected in source"
+    T_TRIVY_TH_TYPE="Type"
+    T_TRIVY_TH_FILE="File"
+    T_TRIVY_TH_MATCH="Match"
+    T_RAW_JSON="Raw JSON"
+    T_VERDICT_PASS="All scanners passed — no critical issues detected"
+    T_VERDICT_WARN="One or more scanners found non-critical issues that require review"
+    T_VERDICT_FAIL="Critical issues detected — malware, critical CVEs, or secrets found"
+    T_FOOTER_GENERATED="Generated"
+  fi
+}
+
+# ── PDF Report ─────────────────────────────────────────────────────────────────
+ensure_pdf_image() {
+  if docker image inspect "$PDF_IMAGE_LOCAL" &>/dev/null 2>&1; then
+    return
+  fi
+  local dockerfile
+  dockerfile="$(dirname "$0")/Dockerfile.pdf"
+  if [[ ! -f "$dockerfile" ]]; then
+    log_warn "Dockerfile.pdf not found — skipping PDF"
+    return 1
+  fi
+  log_info "Building WeasyPrint image (first run, ~2–3 min)…"
+  docker build -t "$PDF_IMAGE_LOCAL" -f "$dockerfile" "$(dirname "$0")" \
+    2>&1 | grep -E 'Step|error|Error|=>|DONE' || true
+  log_ok "WeasyPrint image built: $PDF_IMAGE_LOCAL"
+}
+
+generate_pdf() {
+  local pdf_file="$REPORT_DIR/report.pdf"
+  log_info "Generating PDF report…"
+  ensure_pdf_image || return
+  docker run --rm \
+    -v "$REPORT_DIR:/data" \
+    "$PDF_IMAGE_LOCAL" \
+    /data/report.html \
+    /data/report.pdf 2>/dev/null || {
+      log_warn "PDF generation failed — check WeasyPrint image"
+      return
+    }
+  [[ -f "$pdf_file" ]] && log_ok "PDF report : file://$pdf_file"
+}
+
 generate_report() {
   local overall
   overall=$(overall_status)
   local gh_repo
   gh_repo=$(parse_github_url "$TARGET")
 
+  setup_lang
+
   local overall_class verdict_desc
   case "$overall" in
-    PASS)
-      overall_class="pass"
-      verdict_desc="All scanners passed — no critical issues detected"
-      ;;
-    WARN)
-      overall_class="warn"
-      verdict_desc="One or more scanners found non-critical issues that require review"
-      ;;
-    *)
-      overall_class="fail"
-      verdict_desc="Critical issues detected — malware, critical CVEs, or secrets found"
-      ;;
+    PASS) overall_class="pass"; verdict_desc="$T_VERDICT_PASS" ;;
+    WARN) overall_class="warn"; verdict_desc="$T_VERDICT_WARN" ;;
+    *)    overall_class="fail"; verdict_desc="$T_VERDICT_FAIL" ;;
   esac
 
   local semgrep_badge trivy_badge vt_badge
@@ -471,43 +605,43 @@ generate_report() {
   a:hover{text-decoration:underline}
 
   /* ── Page wrapper ── */
-  .page{max-width:980px;margin:0 auto;padding:2.5rem 1.5rem}
+  .page{max-width:960px;margin:0 auto;padding:2rem 1.5rem}
 
   /* ── Hero ── */
   .hero{
     background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
-    padding:2.5rem 2rem 2rem;text-align:center;margin-bottom:1.75rem;
+    padding:1.75rem 1.5rem 1.5rem;text-align:center;margin-bottom:1.25rem;
   }
-  .hero h1{font-size:1.55rem;font-weight:800;letter-spacing:-0.4px;margin-bottom:1.5rem}
+  .hero h1{font-size:1.4rem;font-weight:800;letter-spacing:-0.4px;margin-bottom:1.25rem}
 
   /* ── Hero info blocks (Target / Ref / Date) ── */
-  .hero-info{display:flex;justify-content:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:1.5rem}
+  .hero-info{display:flex;justify-content:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:1.1rem}
   .info-block{
     background:var(--surface2);border:1px solid var(--border);border-radius:8px;
-    padding:0.55rem 1.2rem;text-align:center;min-width:160px;
+    padding:0.6rem 1.25rem;text-align:center;min-width:150px;
   }
-  .info-label{font-size:0.63rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:0.3rem}
-  .info-val{font-size:0.88rem;font-weight:600;color:var(--text)}
+  .info-label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:0.35rem}
+  .info-val{font-size:1rem;font-weight:600;color:var(--text)}
   .info-val a{color:var(--code)}
-  .info-val code{font-size:0.85rem}
+  .info-val code{font-size:0.95rem}
 
   /* ── Verdict block ── */
   .verdict-block{
-    display:inline-flex;align-items:center;gap:1.1rem;
-    padding:0.8rem 2rem;border-radius:10px;margin-top:0.25rem;
+    display:inline-flex;align-items:center;gap:0.9rem;
+    padding:0.6rem 1.4rem;border-radius:8px;margin-top:0;
   }
   .verdict-block.verdict-pass{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.28)}
   .verdict-block.verdict-warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28)}
   .verdict-block.verdict-fail{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.28)}
-  .verdict-label{font-size:1.05rem;font-weight:800;letter-spacing:1.5px}
+  .verdict-label{font-size:0.95rem;font-weight:800;letter-spacing:1.5px}
   .verdict-block.verdict-pass .verdict-label{color:var(--pass)}
   .verdict-block.verdict-warn .verdict-label{color:var(--warn)}
   .verdict-block.verdict-fail .verdict-label{color:var(--fail)}
-  .verdict-sep{width:1px;height:1.6rem;background:var(--border)}
-  .verdict-desc{font-size:0.82rem;color:var(--muted);text-align:left;max-width:360px}
+  .verdict-sep{width:1px;height:1.3rem;background:var(--border)}
+  .verdict-desc{font-size:0.82rem;color:var(--muted);text-align:left}
 
   /* ── Metric strip ── */
-  .metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.75rem}
+  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin-bottom:1.75rem}
   .metric{
     background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
     padding:1.4rem 1rem;text-align:center;
@@ -541,7 +675,7 @@ generate_report() {
   }
   .mod-title{font-size:0.9rem;font-weight:700;display:flex;align-items:center;gap:0.5rem}
   .mod-icon{font-size:1rem}
-  .mod-body{padding:1.25rem 1.4rem}
+  .mod-body{padding:1.25rem 1.5rem}
 
   /* ── Tables ── */
   table{width:100%;border-collapse:collapse;font-size:0.83rem}
@@ -551,10 +685,35 @@ generate_report() {
     border-bottom:2px solid var(--border);
     font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;
   }
-  td{padding:0.45rem 0.75rem;border-bottom:1px solid var(--border);vertical-align:top}
+  td{padding:0.3rem 0.7rem;border-bottom:1px solid var(--border);vertical-align:top}
   tr:last-child td{border-bottom:none}
   tr:hover td{background:var(--surface2)}
   code{color:var(--code);font-size:0.8rem;font-family:"SF Mono",Menlo,monospace}
+
+  /* ── Row number column ── */
+  .num{width:38px;text-align:center !important;color:var(--muted);font-size:0.75rem;font-variant-numeric:tabular-nums}
+
+  /* ── Rule ID (grey, not a link) ── */
+  .rule-id{color:var(--muted)}
+
+  /* ── Location link (blue, clearly clickable) ── */
+  .loc-cell{white-space:normal;word-break:break-all;max-width:220px}
+  .loc-link{color:#60a5fa;font-family:"SF Mono",Menlo,monospace;font-size:0.78rem}
+  .loc-link:hover{color:#93c5fd;text-decoration:underline}
+
+  /* ── Description cell ── */
+  .desc-cell{white-space:normal;word-break:break-word}
+
+  /* ── Code in table cells must wrap (rule IDs, paths) ── */
+  td code{word-break:break-all}
+
+  /* ── Fixed-layout table (Semgrep) ── */
+  .tbl-fixed{table-layout:fixed}
+  .col-num{width:38px}
+  .col-sev{width:72px}
+  .col-rule{width:22%}
+  .col-loc{width:22%}
+  /* col-desc gets remaining space automatically */
 
   /* ── Severity ── */
   .sev-critical{color:var(--fail);font-weight:700}
@@ -594,7 +753,6 @@ generate_report() {
   }
 
   @media(max-width:600px){
-    .metrics{grid-template-columns:1fr}
     .hero-info{flex-direction:column;align-items:center}
     .verdict-block{flex-direction:column;gap:0.5rem;text-align:center}
     .verdict-sep{display:none}
@@ -607,21 +765,21 @@ generate_report() {
 
 <!-- ── Hero ── -->
 <div class="hero">
-  <h1>🔍 Security Scan Report</h1>
+  <h1>🔍 ${T_REPORT_TITLE}</h1>
 
   <!-- Info blocks -->
   <div class="hero-info">
     <div class="info-block">
-      <div class="info-label">Target</div>
+      <div class="info-label">${T_LABEL_TARGET}</div>
       <div class="info-val"><a href="${TARGET}" target="_blank">${gh_repo}</a></div>
     </div>
     <div class="info-block">
-      <div class="info-label">Ref</div>
+      <div class="info-label">${T_LABEL_REF}</div>
       <div class="info-val"><code>$([ -n "$TARGET_REF" ] && echo "${TARGET_REF}" || echo "HEAD")</code></div>
     </div>
     <div class="info-block">
-      <div class="info-label">Date</div>
-      <div class="info-val">$(date -u "+%Y-%m-%d %H:%M UTC")</div>
+      <div class="info-label">${T_LABEL_DATE}</div>
+      <div class="info-val">$(date "+%Y-%m-%d %H:%M %Z")</div>
     </div>
   </div>
 
@@ -636,21 +794,21 @@ generate_report() {
 <!-- ── Metrics ── -->
 <div class="metrics">
   <div class="metric">
-    <div class="metric-label">VirusTotal</div>
+    <div class="metric-label">${T_VT_LABEL}</div>
     <div class="metric-num $([ "$VT_MALICIOUS" -gt 0 ] && echo red || echo green)">${VT_MALICIOUS}</div>
-    <div class="metric-sub">malicious / ${VT_TOTAL} engines</div>
+    <div class="metric-sub">${T_VT_MALICIOUS_SUB}</div>
     ${vt_badge}
   </div>
   <div class="metric">
-    <div class="metric-label">Semgrep</div>
+    <div class="metric-label">${T_SEMGREP_LABEL}</div>
     <div class="metric-num $([ "$SEMGREP_FINDINGS" -gt 0 ] && echo yellow || echo green)">${SEMGREP_FINDINGS}</div>
-    <div class="metric-sub">code findings</div>
+    <div class="metric-sub">${T_SEMGREP_SUB}</div>
     ${semgrep_badge}
   </div>
   <div class="metric">
-    <div class="metric-label">Trivy</div>
+    <div class="metric-label">${T_TRIVY_LABEL}</div>
     <div class="metric-num $([ "$TRIVY_CRITICAL" -gt 0 ] && echo red || [ "$TRIVY_HIGH" -gt 0 ] && echo yellow || echo green)">${TRIVY_CRITICAL} / ${TRIVY_HIGH}</div>
-    <div class="metric-sub">critical / high &nbsp;·&nbsp; +${TRIVY_MEDIUM} med &nbsp;${TRIVY_LOW} low</div>
+    <div class="metric-sub">${T_TRIVY_SUB} &nbsp;·&nbsp; +${TRIVY_MEDIUM} ${T_TRIVY_MED} &nbsp;${TRIVY_LOW} ${T_TRIVY_LOW}</div>
     ${trivy_badge}
   </div>
 </div>
@@ -660,19 +818,19 @@ generate_report() {
      ══════════════════════════════════════ -->
 <div class="module">
   <div class="mod-head">
-    <div class="mod-title"><span class="mod-icon">🦠</span> VirusTotal <span style="color:var(--muted);font-weight:400;font-size:0.78rem">(vt-cli)</span></div>
+    <div class="mod-title"><span class="mod-icon">🦠</span> ${T_VT_MODULE_TITLE} <span style="color:var(--muted);font-weight:400;font-size:0.78rem">(vt-cli)</span></div>
     ${vt_badge}
   </div>
   <div class="mod-body">
-    $([ "$VT_STATUS" == "skipped" ]           && echo '<p class="msg muted">Skipped — set <code>VT_API_KEY</code> in <code>.env</code> or use <code>--vt-key</code></p>' || true)
-    $([ "$VT_STATUS" == "skipped_too_large" ] && echo '<p class="msg muted">Skipped — archive &gt; 650 MB</p>' || true)
-    $([ "$VT_STATUS" == "error" ]             && echo '<p class="msg warn">Error — check API key or rebuild vt-cli image</p>' || true)
+    $([ "$VT_STATUS" == "skipped" ]           && echo "<p class=\"msg muted\">${T_VT_SKIPPED}</p>" || true)
+    $([ "$VT_STATUS" == "skipped_too_large" ] && echo "<p class=\"msg muted\">${T_VT_TOO_LARGE}</p>" || true)
+    $([ "$VT_STATUS" == "error" ]             && echo "<p class=\"msg warn\">${T_VT_ERROR}</p>" || true)
     $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "
     <table>
-      <thead><tr><th>Category</th><th>Count</th></tr></thead>
+      <thead><tr><th>${T_VT_TH_CATEGORY}</th><th>${T_VT_TH_COUNT}</th></tr></thead>
       <tbody>$(vt_stats_html)</tbody>
     </table>" || true)
-    <div class="raw-link">📄 <a href="virustotal.txt" target="_blank">Raw vt-cli output</a></div>
+    <div class="raw-link">📄 <a href="virustotal.txt" target="_blank">${T_VT_RAW}</a></div>
   </div>
 </div>
 
@@ -681,21 +839,22 @@ generate_report() {
      ══════════════════════════════════════ -->
 <div class="module">
   <div class="mod-head">
-    <div class="mod-title"><span class="mod-icon">🔎</span> Semgrep — Static Analysis</div>
+    <div class="mod-title"><span class="mod-icon">🔎</span> ${T_SEMGREP_MODULE_TITLE}</div>
     ${semgrep_badge}
   </div>
   <div class="mod-body">
-    $([ "$SEMGREP_STATUS" == "pass"  ] && echo '<p class="msg ok">✓ No findings</p>' || true)
-    $([ "$SEMGREP_STATUS" == "error" ] && echo '<p class="msg warn">Scanner error — check Docker logs</p>' || true)
+    $([ "$SEMGREP_STATUS" == "pass"  ] && echo "<p class=\"msg ok\">${T_SEMGREP_CLEAN}</p>" || true)
+    $([ "$SEMGREP_STATUS" == "error" ] && echo "<p class=\"msg warn\">${T_SEMGREP_ERROR}</p>" || true)
     $([ "$SEMGREP_FINDINGS" -gt 0 ] && echo "
     <details open>
-      <summary>${SEMGREP_FINDINGS} finding(s) — showing up to 50</summary>
-      <table>
-        <thead><tr><th>Severity</th><th>Rule</th><th>Location</th><th>Message</th></tr></thead>
-        <tbody>$(semgrep_rows_html)</tbody>
+      <summary>${SEMGREP_FINDINGS} ${T_SEMGREP_FINDINGS_LABEL}</summary>
+      <table class="tbl-fixed">
+        <colgroup><col class="col-num"><col class="col-sev"><col class="col-rule"><col class="col-loc"><col></colgroup>
+        <thead><tr><th class="num">#</th><th>${T_SEMGREP_TH_SEV}</th><th>${T_SEMGREP_TH_RULE}</th><th>${T_SEMGREP_TH_LOC}</th><th>${T_SEMGREP_TH_MSG}</th></tr></thead>
+        <tbody>$(semgrep_rows_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
       </table>
     </details>" || true)
-    <div class="raw-link">📄 <a href="semgrep.json" target="_blank">Raw JSON</a></div>
+    <div class="raw-link">📄 <a href="semgrep.json" target="_blank">${T_RAW_JSON}</a></div>
   </div>
 </div>
 
@@ -704,36 +863,36 @@ generate_report() {
      ══════════════════════════════════════ -->
 <div class="module">
   <div class="mod-head">
-    <div class="mod-title"><span class="mod-icon">🛡️</span> Trivy — Dependencies &amp; Secrets</div>
+    <div class="mod-title"><span class="mod-icon">🛡️</span> ${T_TRIVY_MODULE_TITLE}</div>
     ${trivy_badge}
   </div>
   <div class="mod-body">
-    $([ "$TRIVY_STATUS" == "pass"  ] && echo '<p class="msg ok">✓ No critical issues</p>' || true)
-    $([ "$TRIVY_STATUS" == "error" ] && echo '<p class="msg warn">Scanner error — check Docker logs</p>' || true)
+    $([ "$TRIVY_STATUS" == "pass"  ] && echo "<p class=\"msg ok\">${T_TRIVY_CLEAN}</p>" || true)
+    $([ "$TRIVY_STATUS" == "error" ] && echo "<p class=\"msg warn\">${T_TRIVY_ERROR}</p>" || true)
 
     $([ "$(( TRIVY_CRITICAL + TRIVY_HIGH + TRIVY_MEDIUM + TRIVY_LOW ))" -gt 0 ] && echo "
     <details open>
-      <summary>Vulnerabilities — ${TRIVY_CRITICAL} critical &nbsp;/&nbsp; ${TRIVY_HIGH} high &nbsp;/&nbsp; ${TRIVY_MEDIUM} medium &nbsp;/&nbsp; ${TRIVY_LOW} low</summary>
+      <summary>${T_TRIVY_VULN_LABEL} — ${TRIVY_CRITICAL} critical &nbsp;/&nbsp; ${TRIVY_HIGH} high &nbsp;/&nbsp; ${TRIVY_MEDIUM} medium &nbsp;/&nbsp; ${TRIVY_LOW} low</summary>
       <table>
-        <thead><tr><th>Severity</th><th>CVE</th><th>Package</th><th>Fix</th><th>Title</th></tr></thead>
+        <thead><tr><th>${T_TRIVY_TH_SEV}</th><th>${T_TRIVY_TH_CVE}</th><th>${T_TRIVY_TH_PKG}</th><th>${T_TRIVY_TH_FIX}</th><th>${T_TRIVY_TH_TITLE}</th></tr></thead>
         <tbody>$(trivy_rows_html)</tbody>
       </table>
     </details>" || true)
 
     $([ "$TRIVY_SECRETS" -gt 0 ] && echo "
     <details open>
-      <summary>⚠ ${TRIVY_SECRETS} secret(s) detected in source</summary>
+      <summary>⚠ ${TRIVY_SECRETS} ${T_TRIVY_SECRETS_LABEL}</summary>
       <table>
-        <thead><tr><th>Severity</th><th>Type</th><th>Match</th></tr></thead>
-        <tbody>$(trivy_secrets_html)</tbody>
+        <thead><tr><th>${T_TRIVY_TH_SEV}</th><th>${T_TRIVY_TH_TYPE}</th><th>${T_TRIVY_TH_FILE}</th><th>${T_TRIVY_TH_MATCH}</th></tr></thead>
+        <tbody>$(trivy_secrets_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
       </table>
     </details>" || true)
 
-    <div class="raw-link">📄 <a href="trivy_fs.json" target="_blank">Raw JSON</a></div>
+    <div class="raw-link">📄 <a href="trivy_fs.json" target="_blank">${T_RAW_JSON}</a></div>
   </div>
 </div>
 
-<footer>check.sh &nbsp;·&nbsp; $(date -u "+%Y-%m-%d %H:%M UTC")</footer>
+<footer>check.sh &nbsp;·&nbsp; ${T_FOOTER_GENERATED} $(date "+%Y-%m-%d %H:%M %Z")</footer>
 
 </div><!-- /page -->
 </body>
@@ -773,6 +932,7 @@ main() {
       --no-trivy)    RUN_TRIVY=false ;;
       --no-vt)       RUN_VT=false ;;
       --vt-key)      VT_API_KEY="$2"; shift ;;
+      --lang)        LANG_REPORT="$2"; shift ;;
       *) log_warn "Unknown option: $1" ;;
     esac
     shift
@@ -791,7 +951,7 @@ main() {
   check_deps
   setup_workdir
   # Always generate HTML report on exit — even if a scanner crashes
-  trap 'generate_report 2>/dev/null || true; cleanup' EXIT
+  trap 'generate_report 2>/dev/null || true; generate_pdf 2>/dev/null || true; cleanup' EXIT
 
   clone_repo
 
@@ -800,6 +960,7 @@ main() {
   [[ "$RUN_VT"      == true ]] && run_virustotal || true
 
   generate_report
+  generate_pdf
 
   local overall
   overall=$(overall_status)
@@ -809,7 +970,8 @@ main() {
   echo -e "  Semgrep     : $(term_badge "$SEMGREP_STATUS")  findings=$SEMGREP_FINDINGS"
   echo -e "  Trivy       : $(term_badge "$TRIVY_STATUS")  critical=$TRIVY_CRITICAL  high=$TRIVY_HIGH  secrets=$TRIVY_SECRETS"
   echo ""
-  echo -e "  ${BOLD}Report:${NC} file://$REPORT_DIR/report.html"
+  echo -e "  ${BOLD}HTML:${NC} file://$REPORT_DIR/report.html"
+  [[ -f "$REPORT_DIR/report.pdf" ]] && echo -e "  ${BOLD}PDF :${NC} file://$REPORT_DIR/report.pdf"
   echo ""
 }
 
