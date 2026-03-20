@@ -19,6 +19,7 @@ log_section() { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${NC}\n"; }
 # ── Docker image versions ─────────────────────────────────────────────────────
 SEMGREP_IMAGE="semgrep/semgrep:latest"
 TRIVY_IMAGE="aquasec/trivy:latest"
+HADOLINT_IMAGE="hadolint/hadolint:latest"
 VT_IMAGE_LOCAL="vt-cli:local"      # built locally from Dockerfile.vt
 
 # ── Global state ──────────────────────────────────────────────────────────────
@@ -31,9 +32,10 @@ LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
 PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
 
 # Result variables (set by each scanner)
-SEMGREP_STATUS="skipped"; SEMGREP_FINDINGS=0; SEMGREP_ERRORS=0
-TRIVY_STATUS="skipped";   TRIVY_CRITICAL=0; TRIVY_HIGH=0; TRIVY_MEDIUM=0; TRIVY_LOW=0; TRIVY_SECRETS=0
-VT_STATUS="skipped";      VT_MALICIOUS=0;   VT_TOTAL=0
+SEMGREP_STATUS="skipped";   SEMGREP_FINDINGS=0;  SEMGREP_ERRORS=0
+TRIVY_STATUS="skipped";     TRIVY_CRITICAL=0;    TRIVY_HIGH=0; TRIVY_MEDIUM=0; TRIVY_LOW=0; TRIVY_SECRETS=0
+VT_STATUS="skipped";        VT_MALICIOUS=0;      VT_TOTAL=0
+HADOLINT_STATUS="skipped";  HADOLINT_ERRORS=0;   HADOLINT_WARNINGS=0; HADOLINT_TOTAL=0; HADOLINT_FILES=0
 
 # ── Usage ─────────────────────────────────────────────────────────────────────
 usage() {
@@ -52,6 +54,8 @@ ${BOLD}Options:${NC}
   --no-semgrep    Skip Semgrep scan
   --no-trivy      Skip Trivy scan
   --no-vt         Skip VirusTotal scan
+  --no-hadolint   Skip Hadolint Dockerfile scan
+  --pdf           Also generate PDF report (requires Docker + Dockerfile.pdf)
   --vt-key KEY    VirusTotal API key (overrides VT_API_KEY env)
   --lang LANG     Report language: en (default) or ru
 
@@ -123,17 +127,102 @@ clone_repo() {
   fi
 }
 
+# ── Semgrep: auto-detect languages → select rulesets ─────────────────────────
+_semgrep_configs() {
+  local src="$WORK_DIR/source"
+
+  # ── Core security (always, language-agnostic) ──
+  local cfg="p/security-audit p/owasp-top-ten p/cwe-top-25 p/secrets p/trailofbits"
+
+  # ── JavaScript / TypeScript / Node.js ──
+  if [[ -f "$src/package.json" ]] || \
+     find "$src" -maxdepth 4 \( -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" \) \
+       -not -path "*/node_modules/*" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/javascript p/typescript p/nodejs p/eslint-plugin-security p/jwt"
+    if [[ -f "$src/package.json" ]]; then
+      grep -qE '"react"|"next"|"preact"' "$src/package.json" 2>/dev/null && cfg="$cfg p/react"
+      grep -q '"express"'               "$src/package.json" 2>/dev/null && cfg="$cfg p/express"
+    fi
+    log_info "  → detected: JavaScript / TypeScript / Node.js" >&2
+  fi
+
+  # ── Python ──
+  if [[ -f "$src/requirements.txt" ]] || [[ -f "$src/setup.py" ]] || \
+     [[ -f "$src/pyproject.toml" ]] || \
+     find "$src" -maxdepth 4 -name "*.py" -not -path "*/.venv/*" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/python"
+    [[ -f "$src/manage.py" ]] && cfg="$cfg p/django" && log_info "  → detected: Django" >&2
+    { [[ -f "$src/requirements.txt" ]] && grep -qi "flask" "$src/requirements.txt" 2>/dev/null; } \
+      && cfg="$cfg p/flask" && log_info "  → detected: Flask" >&2
+    log_info "  → detected: Python" >&2
+  fi
+
+  # ── Go ──
+  if [[ -f "$src/go.mod" ]] || \
+     find "$src" -maxdepth 3 -name "*.go" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/golang"
+    log_info "  → detected: Go" >&2
+  fi
+
+  # ── Java / Kotlin ──
+  if [[ -f "$src/pom.xml" ]] || [[ -f "$src/build.gradle" ]] || [[ -f "$src/build.gradle.kts" ]]; then
+    cfg="$cfg p/java"
+    find "$src" -maxdepth 4 -name "*.kt" 2>/dev/null | grep -q . && cfg="$cfg p/kotlin"
+    log_info "  → detected: Java / Kotlin" >&2
+  fi
+
+  # ── Ruby ──
+  if [[ -f "$src/Gemfile" ]] || \
+     find "$src" -maxdepth 3 -name "*.rb" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/ruby"
+    log_info "  → detected: Ruby" >&2
+  fi
+
+  # ── PHP ──
+  if [[ -f "$src/composer.json" ]] || \
+     find "$src" -maxdepth 3 -name "*.php" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/php"
+    log_info "  → detected: PHP" >&2
+  fi
+
+  # ── Rust ──
+  if [[ -f "$src/Cargo.toml" ]]; then
+    cfg="$cfg p/rust"
+    log_info "  → detected: Rust" >&2
+  fi
+
+  # ── C / C++ ──
+  if find "$src" -maxdepth 4 \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.cc" \) \
+       2>/dev/null | grep -q .; then
+    cfg="$cfg p/c"
+    log_info "  → detected: C / C++" >&2
+  fi
+
+  # ── Terraform ──
+  if find "$src" -maxdepth 5 -name "*.tf" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/terraform"
+    log_info "  → detected: Terraform" >&2
+  fi
+
+  # ── Kubernetes manifests ──
+  if find "$src" -maxdepth 5 \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null \
+       | xargs grep -l "^apiVersion:" 2>/dev/null | grep -q .; then
+    cfg="$cfg p/kubernetes"
+    log_info "  → detected: Kubernetes" >&2
+  fi
+
+  echo "$cfg"
+}
+
 # ── Semgrep ───────────────────────────────────────────────────────────────────
 run_semgrep() {
   log_section "Semgrep — Static Code Analysis"
 
   local out="$REPORT_DIR/semgrep.json"
-
   local semgrep_log="$REPORT_DIR/semgrep.log"
 
-  # semgrep exits 1 when findings exist — that is expected
-  # NOTE: --quiet removed because it suppresses JSON stdout in semgrep ≥1.x
-  # Try cloud ruleset first; suppress stderr noise during the attempt
+  # Level 1: --config=auto  (downloads optimal rules per language from semgrep.dev)
+  log_info "Trying semgrep auto-config (cloud rules)…"
   docker run --rm \
     -v "$WORK_DIR/source:/src:ro" \
     "$SEMGREP_IMAGE" \
@@ -145,10 +234,43 @@ run_semgrep() {
       --exclude '*.dockerfile' \
       /src > "$out" 2>"$semgrep_log" || true
 
-  # If JSON output is empty or invalid, fall back to bundled p/default ruleset
-  # (--config=auto downloads rules from semgrep.dev; may fail in air-gapped/rate-limited envs)
+  # Level 2: auto failed → smart multi-ruleset based on detected languages
   if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
-    log_info "Falling back to bundled p/default ruleset"
+    log_info "Auto-config unavailable — detecting project languages…"
+    local cfgs
+    cfgs=$(_semgrep_configs)
+    # Build --config=xxx args (space-separated, no spaces inside each entry)
+    local config_args=""
+    for c in $cfgs; do
+      config_args="$config_args --config=$c"
+    done
+    log_info "Running with rulesets: $cfgs"
+    # shellcheck disable=SC2086
+    docker run --rm \
+      -v "$WORK_DIR/source:/src:ro" \
+      "$SEMGREP_IMAGE" \
+      semgrep scan \
+        $config_args \
+        --json \
+        --metrics=off \
+        --exclude 'Dockerfile*' \
+        --exclude '*.dockerfile' \
+        /src > "$out" 2>>"$semgrep_log" || true
+  fi
+
+  # Level 3: p/default is always bundled inside the semgrep Docker image (works offline).
+  # Run it if: (a) previous levels produced no output, OR (b) Level 2 found 0 findings
+  # (Level 2 rulesets need semgrep.dev — if the network failed they silently load 0 rules).
+  local l3_out="$REPORT_DIR/semgrep_default.json"
+  local run_l3=false
+  if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
+    run_l3=true
+  elif [[ "$(jq '[.results[]] | length' "$out" 2>/dev/null || echo 0)" -eq 0 ]]; then
+    log_info "Level 2 found 0 findings — also running bundled p/default to verify"
+    run_l3=true
+  fi
+
+  if [[ "$run_l3" == true ]]; then
     docker run --rm \
       -v "$WORK_DIR/source:/src:ro" \
       "$SEMGREP_IMAGE" \
@@ -158,7 +280,18 @@ run_semgrep() {
         --metrics=off \
         --exclude 'Dockerfile*' \
         --exclude '*.dockerfile' \
-        /src > "$out" 2>>"$semgrep_log" || true
+        /src > "$l3_out" 2>>"$semgrep_log" || true
+
+    # Merge Level 3 into main output
+    if [[ -s "$l3_out" ]] && jq -e '.results' "$l3_out" &>/dev/null; then
+      if [[ -s "$out" ]] && jq -e '.results' "$out" &>/dev/null; then
+        # Merge: combine .results and .errors arrays from both files
+        jq -s '{ results: (.[0].results + .[1].results | unique_by(.check_id + .path + (.start.line | tostring))), errors: (.[0].errors + .[1].errors) }' \
+          "$out" "$l3_out" > "$out.merged" && mv "$out.merged" "$out"
+      else
+        mv "$l3_out" "$out"
+      fi
+    fi
   fi
 
   if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
@@ -174,10 +307,11 @@ run_semgrep() {
     log_ok "No findings"
     SEMGREP_STATUS="pass"
   else
-    log_warn "$SEMGREP_FINDINGS finding(s)"
-    # Print top findings
-    jq -r '.results[:10][] | "  [\(.extra.severity // "?")] \(.check_id): \(.path):\(.start.line)"' \
-      "$out" 2>/dev/null || true
+    log_warn "$SEMGREP_FINDINGS finding(s) — top 10:"
+    # Print top findings (severity is semgrep's own classification, not a script error)
+    jq -r '.results[:10][] |
+      "  · \(.extra.severity | if . == "ERROR" then "HIGH" elif . == "WARNING" then "MEDIUM" else . end)\t\(.check_id | split(".") | last)\t\(.path | split("/") | last):\(.start.line)"' \
+      "$out" 2>/dev/null | column -t -s $'\t' || true
     SEMGREP_STATUS="warn"
   fi
 }
@@ -372,9 +506,9 @@ term_badge() {
 
 overall_status() {
   local s="PASS"
-  [[ "$SEMGREP_STATUS" == "fail" || "$TRIVY_STATUS" == "fail" || "$VT_STATUS" == "fail" ]] && s="FAIL"
+  [[ "$SEMGREP_STATUS" == "fail" || "$TRIVY_STATUS" == "fail" || "$VT_STATUS" == "fail" || "$HADOLINT_STATUS" == "fail" ]] && s="FAIL"
   [[ "$s" != "FAIL" ]] && {
-    [[ "$SEMGREP_STATUS" == "warn" || "$TRIVY_STATUS" == "warn" || "$VT_STATUS" == "warn" ]] && s="WARN"
+    [[ "$SEMGREP_STATUS" == "warn" || "$TRIVY_STATUS" == "warn" || "$VT_STATUS" == "warn" || "$HADOLINT_STATUS" == "warn" ]] && s="WARN"
   }
   echo "$s"
 }
@@ -384,10 +518,13 @@ semgrep_rows_html() {
   [[ ! -s "$REPORT_DIR/semgrep.json" ]] && return
   local base="https://github.com/${1}/blob/${2}"
   jq -r --arg base "$base" '
+    # Map semgrep internal severities to human-readable labels (ERROR is not a script error)
+    def sev_label: if . == "ERROR" then "HIGH" elif . == "WARNING" then "MEDIUM" else . end;
+    def sev_css:   ascii_downcase | if . == "error" then "high" elif . == "warning" then "medium" else . end;
     .results[:50] | to_entries[] | .key as $i | .value |
     "<tr>
       <td class=\"num\">\($i + 1)</td>
-      <td class=\"sev-\(.extra.severity | ascii_downcase)\">\(.extra.severity // "?")</td>
+      <td class=\"sev-\(.extra.severity | sev_css)\">\(.extra.severity | sev_label)</td>
       <td><code class=\"rule-id\">\(.check_id)</code></td>
       <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/"))#L\(.start.line)\" target=\"_blank\" class=\"loc-link\">\(.path | ltrimstr("/src/")):\(.start.line)</a></td>
       <td class=\"desc-cell\">\(.extra.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
@@ -418,6 +555,174 @@ trivy_secrets_html() {
       <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target)\" target=\"_blank\" class=\"loc-link\">\($r.Target)</a></td>
       <td class=\"desc-cell\"><code>\(.Match | gsub("<";"&lt;") | .[0:120])</code></td>
     </tr>"' "$REPORT_DIR/trivy_fs.json" 2>/dev/null || true
+}
+
+# ── Hadolint ──────────────────────────────────────────────────────────────────
+run_hadolint() {
+  log_section "Hadolint — Dockerfile Analysis"
+
+  local out="$REPORT_DIR/hadolint.json"
+
+  # Find all Dockerfiles (excluding .git)
+  local df_list
+  df_list=$(find "$WORK_DIR/source" -maxdepth 6 \
+    \( -name "Dockerfile" -o -name "Dockerfile.*" -o -name "*.dockerfile" \) \
+    -not -path "*/.git/*" 2>/dev/null | sort)
+
+  if [[ -z "$df_list" ]]; then
+    log_info "No Dockerfiles found — skipping"
+    HADOLINT_STATUS="skipped_no_docker"
+    return
+  fi
+
+  HADOLINT_FILES=$(echo "$df_list" | wc -l | tr -d ' ')
+  log_info "Found $HADOLINT_FILES Dockerfile(s)"
+
+  # Build /src-relative path list for the Docker container
+  local src_paths=""
+  while IFS= read -r df; do
+    src_paths="$src_paths /src${df#$WORK_DIR/source}"
+  done <<< "$df_list"
+
+  # shellcheck disable=SC2086
+  docker run --rm \
+    -v "$WORK_DIR/source:/src:ro" \
+    "$HADOLINT_IMAGE" \
+    hadolint --format json $src_paths > "$out" 2>/dev/null || true
+
+  # hadolint exits 1 on findings; ensure valid JSON
+  if [[ ! -s "$out" ]] || ! jq -e '.' "$out" &>/dev/null 2>&1; then
+    echo "[]" > "$out"
+  fi
+
+  HADOLINT_ERRORS=$(  jq '[.[] | select(.level == "error")]   | length' "$out" 2>/dev/null || echo 0)
+  HADOLINT_WARNINGS=$(jq '[.[] | select(.level == "warning")] | length' "$out" 2>/dev/null || echo 0)
+  HADOLINT_TOTAL=$(   jq 'length'                              "$out" 2>/dev/null || echo 0)
+
+  echo -e "  Errors: ${RED}${HADOLINT_ERRORS}${NC}  Warnings: ${YELLOW}${HADOLINT_WARNINGS}${NC}  Info: $(( HADOLINT_TOTAL - HADOLINT_ERRORS - HADOLINT_WARNINGS ))"
+
+  # Top errors to terminal
+  if [[ "$HADOLINT_ERRORS" -gt 0 ]]; then
+    jq -r '[ .[] | select(.level=="error") ] [:5][] |
+      "  · \(.code)  \(.message | .[0:80])"' "$out" 2>/dev/null || true
+  fi
+
+  if [[ "$HADOLINT_ERRORS" -gt 0 ]]; then
+    log_warn "$HADOLINT_ERRORS Dockerfile error(s) detected"
+    HADOLINT_STATUS="warn"
+  elif [[ "$HADOLINT_WARNINGS" -gt 0 ]]; then
+    log_warn "$HADOLINT_WARNINGS Dockerfile warning(s)"
+    HADOLINT_STATUS="warn"
+  elif [[ "$HADOLINT_TOTAL" -eq 0 ]]; then
+    log_ok "No issues found"
+    HADOLINT_STATUS="pass"
+  else
+    log_ok "Only informational findings"
+    HADOLINT_STATUS="pass"
+  fi
+}
+
+hadolint_rows_html() {
+  [[ ! -s "$REPORT_DIR/hadolint.json" ]] && return
+  local base="https://github.com/${1}/blob/${2}"
+  jq -r --arg base "$base" '
+    to_entries[] | .key as $i | .value |
+    "<tr>
+      <td class=\"num\">\($i + 1)</td>
+      <td class=\"sev-\(if .level=="error" then "error" elif .level=="warning" then "warning" else "info" end)\">\(.level | ascii_upcase)</td>
+      <td><code class=\"rule-id\">\(.code)</code></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.file | ltrimstr("/src/"))#L\(.line)\" target=\"_blank\" class=\"loc-link\">\(.file | ltrimstr("/src/")):\(.line)</a></td>
+      <td class=\"desc-cell\">\(.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
+    </tr>"' "$REPORT_DIR/hadolint.json" 2>/dev/null | head -200 || true
+}
+
+vt_meta_html() {
+  local f="$REPORT_DIR/virustotal.txt"
+  [[ ! -s "$f" ]] && return
+  local sha256 md5 sha1 size type_desc meaningful_name rep times_sub unique_src first_sub last_scan
+  sha256=$(         awk '/^[[:space:]]+sha256:/{print $2; exit}' "$f")
+  md5=$(            awk '/^[[:space:]]+md5:/{print $2; exit}' "$f")
+  sha1=$(           awk '/^[[:space:]]+sha1:/{print $2; exit}' "$f")
+  size=$(           awk '/^[[:space:]]+size:/{print $2+0; exit}' "$f")
+  type_desc=$(      awk '/^[[:space:]]+type_description:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
+  meaningful_name=$(awk '/^[[:space:]]+meaningful_name:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
+  rep=$(            awk '/^[[:space:]]+reputation:/{print $2; exit}' "$f")
+  times_sub=$(      awk '/^[[:space:]]+times_submitted:/{print $2; exit}' "$f")
+  unique_src=$(     awk '/^[[:space:]]+unique_sources:/{print $2; exit}' "$f")
+  first_sub=$(      awk '/^[[:space:]]+first_submission_date:/{print $2; exit}' "$f")
+  last_scan=$(      awk '/^[[:space:]]+last_analysis_date:/{print $2; exit}' "$f")
+
+  # Format size
+  local size_fmt="—"
+  if [[ -n "$size" && "$size" -gt 0 ]] 2>/dev/null; then
+    if   [[ "$size" -gt 1073741824 ]]; then size_fmt="$(( size/1024/1024/1024 )) GB"
+    elif [[ "$size" -gt 1048576    ]]; then size_fmt="$(( size/1024/1024 )) MB"
+    else                                    size_fmt="$(( size/1024 )) KB"
+    fi
+    size_fmt="$size_fmt &nbsp;<span style='color:var(--muted);font-size:0.75rem'>(${size} bytes)</span>"
+  fi
+
+  # Format epoch → human date (macOS: date -r / Linux: date -d @)
+  local first_sub_fmt last_scan_fmt
+  first_sub_fmt=$(date -r "$first_sub" "+%Y-%m-%d %H:%M" 2>/dev/null || \
+                  date -d "@$first_sub" "+%Y-%m-%d %H:%M" 2>/dev/null || echo "${first_sub:-—}")
+  last_scan_fmt=$(date  -r "$last_scan"  "+%Y-%m-%d %H:%M" 2>/dev/null || \
+                  date -d "@$last_scan"  "+%Y-%m-%d %H:%M" 2>/dev/null || echo "${last_scan:-—}")
+
+  # Reputation coloring
+  local rep_cls="" rep_val="${rep:-—}"
+  if [[ -n "$rep" ]] 2>/dev/null; then
+    [[ "$rep" -lt 0 ]] && rep_cls=' class="sev-critical"'
+    [[ "$rep" -gt 0 ]] && rep_cls=' class="sev-info"'
+  fi
+
+  cat <<VT_META_EOF
+<div class="vt-meta">
+  <div class="vt-meta-row"><span class="vt-mk">SHA-256</span><code class="vt-hash">${sha256:-—}</code></div>
+  <div class="vt-meta-row"><span class="vt-mk">MD5</span><code class="vt-hash">${md5:-—}</code></div>
+  <div class="vt-meta-row"><span class="vt-mk">SHA-1</span><code class="vt-hash">${sha1:-—}</code></div>
+  <div class="vt-meta-row"><span class="vt-mk">File type</span><span>${type_desc:-—}</span></div>
+  <div class="vt-meta-row"><span class="vt-mk">File size</span><span>${size_fmt}</span></div>
+  <div class="vt-meta-row"><span class="vt-mk">Name (VT)</span><span>${meaningful_name:-—}</span></div>
+  <div class="vt-meta-row"><span class="vt-mk">Reputation</span><span${rep_cls}>${rep_val}</span></div>
+  <div class="vt-meta-row"><span class="vt-mk">Times submitted</span><span>${times_sub:-—} &nbsp;<span style='color:var(--muted);font-size:0.75rem'>(${unique_src:-?} unique source(s))</span></span></div>
+  <div class="vt-meta-row"><span class="vt-mk">First seen</span><span>${first_sub_fmt:-—}</span></div>
+  <div class="vt-meta-row"><span class="vt-mk">Last scan</span><span>${last_scan_fmt:-—}</span></div>
+</div>
+VT_META_EOF
+}
+
+vt_engines_html() {
+  # Show only malicious/suspicious engines as grid items.
+  # Engine name is read from the 4-space YAML map key ("    Antiy-AVL:"),
+  # NOT from the engine_name: attribute — more robust across vt-cli versions.
+  local f="$REPORT_DIR/virustotal.txt"
+  [[ ! -s "$f" ]] && return
+  awk '
+    /last_analysis_results:/  { in_r=1; next }
+    in_r && /^  [^ \t]/       { in_r=0 }         # sibling 2-space key → leave block
+    in_r && /^    [^ \t]/ {                       # 4-space engine header (e.g. "    Antiy-AVL:")
+      eng=$0
+      gsub(/^[[:space:]]+|:[[:space:]]*$/, "", eng)
+      gsub(/"/, "", eng)
+      cat=""; res=""
+      next
+    }
+    in_r && /category:/ { cat=$2; gsub(/"/, "", cat) }
+    in_r && /result:/ {
+      res=""
+      if (NF>1 && $2!="null" && $2!="") {
+        for(i=2;i<=NF;i++) res=res (res==""?"":" ") $i
+        gsub(/"/, "", res)
+      }
+      if (eng!="" && (cat=="malicious" || cat=="suspicious")) {
+        verdict = (cat=="malicious") ? (res==""?"Malicious":res) : (res==""?"Suspicious":res)
+        cls     = (cat=="malicious") ? "malicious" : "suspicious"
+        print "<div class=\"vt-eng\" data-cat=\""cat"\"><span class=\"vt-eng-name\">"eng"</span><span class=\"vt-eng-verdict vt-v-"cls"\">"verdict"</span></div>"
+      }
+      cat=""; res=""
+    }
+  ' "$f"
 }
 
 vt_stats_html() {
@@ -482,6 +787,17 @@ setup_lang() {
     T_VERDICT_PASS="Все проверки пройдены — критических угроз не обнаружено"
     T_VERDICT_WARN="Обнаружены некритические проблемы, требующие проверки"
     T_VERDICT_FAIL="Обнаружены критические угрозы — вредоносный код, критические CVE или секреты"
+    T_HADOLINT_LABEL="Hadolint"
+    T_HADOLINT_METRIC_SUB="ошибок / предупреждений"
+    T_HADOLINT_MODULE_TITLE="Hadolint — Анализ Dockerfile"
+    T_HADOLINT_CLEAN="✓ Dockerfile-файлы в порядке"
+    T_HADOLINT_SKIPPED="Dockerfile-файлы не найдены"
+    T_HADOLINT_TH_SEV="Уровень"
+    T_HADOLINT_TH_RULE="Правило"
+    T_HADOLINT_TH_LOC="Расположение"
+    T_HADOLINT_TH_MSG="Описание"
+    T_HADOLINT_FINDINGS_LABEL="замечаний"
+    T_HADOLINT_FILES_LABEL="файлов проверено"
     T_FOOTER_GENERATED="Сформировано"
   else
     T_REPORT_TITLE="Security Scan Report"
@@ -528,6 +844,17 @@ setup_lang() {
     T_VERDICT_PASS="All scanners passed — no critical issues detected"
     T_VERDICT_WARN="One or more scanners found non-critical issues that require review"
     T_VERDICT_FAIL="Critical issues detected — malware, critical CVEs, or secrets found"
+    T_HADOLINT_LABEL="Hadolint"
+    T_HADOLINT_METRIC_SUB="errors / warnings"
+    T_HADOLINT_MODULE_TITLE="Hadolint — Dockerfile Analysis"
+    T_HADOLINT_CLEAN="✓ No Dockerfile issues"
+    T_HADOLINT_SKIPPED="No Dockerfiles found in repository"
+    T_HADOLINT_TH_SEV="Level"
+    T_HADOLINT_TH_RULE="Rule"
+    T_HADOLINT_TH_LOC="Location"
+    T_HADOLINT_TH_MSG="Message"
+    T_HADOLINT_FINDINGS_LABEL="finding(s)"
+    T_HADOLINT_FILES_LABEL="file(s) scanned"
     T_FOOTER_GENERATED="Generated"
   fi
 }
@@ -572,17 +899,49 @@ generate_report() {
 
   setup_lang
 
-  local overall_class verdict_desc
+  local overall_class verdict_desc=""
   case "$overall" in
     PASS) overall_class="pass"; verdict_desc="$T_VERDICT_PASS" ;;
     WARN) overall_class="warn"; verdict_desc="$T_VERDICT_WARN" ;;
-    *)    overall_class="fail"; verdict_desc="$T_VERDICT_FAIL" ;;
+    *)    overall_class="fail" ;;
   esac
 
-  local semgrep_badge trivy_badge vt_badge
+  # For FAIL: build a specific one-sentence summary from actual findings
+  if [[ "$overall" == "FAIL" ]]; then
+    local _parts=""
+    if [[ "$VT_STATUS" == "fail" ]]; then
+      if [[ "$LANG_REPORT" == "ru" ]]; then
+        _parts="VirusTotal: $VT_MALICIOUS из $VT_TOTAL движков пометили файл как вредоносный"
+      else
+        _parts="VirusTotal flagged $VT_MALICIOUS/$VT_TOTAL engines as malicious"
+      fi
+    fi
+    if [[ "$TRIVY_CRITICAL" -gt 0 ]]; then
+      local _tri
+      if [[ "$LANG_REPORT" == "ru" ]]; then
+        _tri="Trivy: $TRIVY_CRITICAL критических CVE"
+      else
+        _tri="Trivy: $TRIVY_CRITICAL critical CVE(s)"
+      fi
+      _parts="${_parts:+${_parts}; }${_tri}"
+    fi
+    if [[ "$TRIVY_SECRETS" -gt 0 ]]; then
+      local _sec
+      if [[ "$LANG_REPORT" == "ru" ]]; then
+        _sec="$TRIVY_SECRETS секрет(ов) обнаружено в исходном коде"
+      else
+        _sec="$TRIVY_SECRETS secret(s) found in source code"
+      fi
+      _parts="${_parts:+${_parts}; }${_sec}"
+    fi
+    verdict_desc="${_parts:-$T_VERDICT_FAIL}"
+  fi
+
+  local semgrep_badge trivy_badge vt_badge hadolint_badge
   semgrep_badge=$(status_badge "$SEMGREP_STATUS")
   trivy_badge=$(status_badge "$TRIVY_STATUS")
   vt_badge=$(status_badge "$VT_STATUS")
+  hadolint_badge=$(status_badge "$HADOLINT_STATUS")
 
   cat > "$REPORT_DIR/report.html" <<HTMLEOF
 <!DOCTYPE html>
@@ -641,7 +1000,7 @@ generate_report() {
   .verdict-desc{font-size:0.82rem;color:var(--muted);text-align:left}
 
   /* ── Metric strip ── */
-  .metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem;margin-bottom:1.75rem}
+  .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.75rem}
   .metric{
     background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
     padding:1.4rem 1rem;text-align:center;
@@ -710,10 +1069,11 @@ generate_report() {
   /* ── Fixed-layout table (Semgrep) ── */
   .tbl-fixed{table-layout:fixed}
   .col-num{width:38px}
-  .col-sev{width:72px}
+  .col-sev{width:11%}
   .col-rule{width:22%}
   .col-loc{width:22%}
   /* col-desc gets remaining space automatically */
+  th{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
   /* ── Severity ── */
   .sev-critical{color:var(--fail);font-weight:700}
@@ -740,6 +1100,27 @@ generate_report() {
   .msg.warn{color:var(--warn)}
   .msg.muted{color:var(--muted);font-style:italic}
 
+  /* ── VT metadata ── */
+  .vt-meta{margin-bottom:1.25rem;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .vt-meta-row{display:flex;gap:1rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border);align-items:baseline;font-size:0.83rem}
+  .vt-meta-row:last-child{border-bottom:none}
+  .vt-meta-row:nth-child(odd){background:rgba(255,255,255,.015)}
+  .vt-mk{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);min-width:130px;flex-shrink:0;padding-top:1px}
+  .vt-hash{word-break:break-all;font-size:0.72rem;color:var(--code)}
+
+  /* ── VT engine grid (Security vendors' analysis) ── */
+  .vt-engine-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.3rem;margin-top:0.6rem}
+  .vt-eng{display:flex;justify-content:space-between;align-items:center;padding:0.3rem 0.7rem;background:var(--surface2);border-radius:4px;font-size:0.8rem;border:1px solid transparent}
+  .vt-eng[data-cat="malicious"]{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.28)}
+  .vt-eng[data-cat="suspicious"]{background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.28)}
+  .vt-eng-name{color:var(--text);font-size:0.78rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vt-eng-verdict{font-size:0.71rem;font-weight:600;padding:1px 7px;border-radius:3px;white-space:nowrap;margin-left:0.5rem;flex-shrink:0}
+  .vt-v-malicious{color:var(--fail);background:rgba(239,68,68,.18)}
+  .vt-v-suspicious{color:var(--warn);background:rgba(245,158,11,.18)}
+  .vt-v-harmless{color:var(--pass);background:rgba(34,197,94,.1)}
+  .vt-v-undetected{color:var(--muted)}
+  .vt-v-timeout,.vt-v-unsupported{color:var(--muted);font-style:italic;font-size:0.68rem}
+
   /* ── Raw link ── */
   .raw-link{display:block;margin-top:0.75rem;font-size:0.78rem;color:var(--muted)}
   .raw-link a{color:var(--muted)}
@@ -752,6 +1133,13 @@ generate_report() {
     border-top:1px solid var(--border);margin-top:0.5rem;
   }
 
+  @media(max-width:700px){
+    .metrics{grid-template-columns:repeat(2,1fr)}
+    .vt-engine-grid{grid-template-columns:1fr}
+  }
+  @media(max-width:480px){
+    .metrics{grid-template-columns:1fr}
+  }
   @media(max-width:600px){
     .hero-info{flex-direction:column;align-items:center}
     .verdict-block{flex-direction:column;gap:0.5rem;text-align:center}
@@ -811,6 +1199,12 @@ generate_report() {
     <div class="metric-sub">${T_TRIVY_SUB} &nbsp;·&nbsp; +${TRIVY_MEDIUM} ${T_TRIVY_MED} &nbsp;${TRIVY_LOW} ${T_TRIVY_LOW}</div>
     ${trivy_badge}
   </div>
+  <div class="metric">
+    <div class="metric-label">${T_HADOLINT_LABEL}</div>
+    <div class="metric-num $([ "$HADOLINT_ERRORS" -gt 0 ] && echo red || [ "$HADOLINT_WARNINGS" -gt 0 ] && echo yellow || echo green)">$([ "$HADOLINT_STATUS" == "skipped_no_docker" ] && echo "—" || echo "${HADOLINT_ERRORS} / ${HADOLINT_WARNINGS}")</div>
+    <div class="metric-sub">$([ "$HADOLINT_STATUS" == "skipped_no_docker" ] && echo "no Dockerfiles" || echo "${HADOLINT_FILES} files &nbsp;·&nbsp; ${T_HADOLINT_METRIC_SUB}")</div>
+    ${hadolint_badge}
+  </div>
 </div>
 
 <!-- ══════════════════════════════════════
@@ -825,11 +1219,20 @@ generate_report() {
     $([ "$VT_STATUS" == "skipped" ]           && echo "<p class=\"msg muted\">${T_VT_SKIPPED}</p>" || true)
     $([ "$VT_STATUS" == "skipped_too_large" ] && echo "<p class=\"msg muted\">${T_VT_TOO_LARGE}</p>" || true)
     $([ "$VT_STATUS" == "error" ]             && echo "<p class=\"msg warn\">${T_VT_ERROR}</p>" || true)
+    $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "$(vt_meta_html)" || true)
     $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "
-    <table>
-      <thead><tr><th>${T_VT_TH_CATEGORY}</th><th>${T_VT_TH_COUNT}</th></tr></thead>
-      <tbody>$(vt_stats_html)</tbody>
-    </table>" || true)
+    <details open>
+      <summary>${T_VT_TH_CATEGORY} — ${T_VT_TH_COUNT}</summary>
+      <table>
+        <thead><tr><th>${T_VT_TH_CATEGORY}</th><th>${T_VT_TH_COUNT}</th></tr></thead>
+        <tbody>$(vt_stats_html)</tbody>
+      </table>
+    </details>" || true)
+    $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "
+    <details $([ "$VT_MALICIOUS" -gt 0 ] && echo 'open')>
+      <summary>🔬 Security vendors' analysis — ${VT_MALICIOUS} / ${VT_TOTAL} engines detected</summary>
+      <div class='vt-engine-grid'>$(vt_engines_html)</div>
+    </details>" || true)
     <div class="raw-link">📄 <a href="virustotal.txt" target="_blank">${T_VT_RAW}</a></div>
   </div>
 </div>
@@ -892,6 +1295,31 @@ generate_report() {
   </div>
 </div>
 
+<!-- ══════════════════════════════════════
+     MODULE: Hadolint
+     ══════════════════════════════════════ -->
+<div class="module">
+  <div class="mod-head">
+    <div class="mod-title"><span class="mod-icon">🐳</span> ${T_HADOLINT_MODULE_TITLE}</div>
+    ${hadolint_badge}
+  </div>
+  <div class="mod-body">
+    $([ "$HADOLINT_STATUS" == "skipped_no_docker" ] && echo "<p class=\"msg muted\">${T_HADOLINT_SKIPPED}</p>" || true)
+    $([ "$HADOLINT_STATUS" == "pass" ]              && echo "<p class=\"msg ok\">${T_HADOLINT_CLEAN}</p>" || true)
+    $([ "$HADOLINT_FILES" -gt 0 ] && echo "<p class=\"msg muted\" style='font-size:0.8rem'>${HADOLINT_FILES} ${T_HADOLINT_FILES_LABEL} &nbsp;·&nbsp; ${HADOLINT_ERRORS} errors &nbsp;·&nbsp; ${HADOLINT_WARNINGS} warnings</p>" || true)
+    $([ "$HADOLINT_TOTAL" -gt 0 ] && echo "
+    <details open>
+      <summary>${HADOLINT_TOTAL} ${T_HADOLINT_FINDINGS_LABEL}</summary>
+      <table class='tbl-fixed'>
+        <colgroup><col class='col-num'><col class='col-sev'><col style='width:9%'><col class='col-loc'><col></colgroup>
+        <thead><tr><th class='num'>#</th><th>${T_HADOLINT_TH_SEV}</th><th>${T_HADOLINT_TH_RULE}</th><th>${T_HADOLINT_TH_LOC}</th><th>${T_HADOLINT_TH_MSG}</th></tr></thead>
+        <tbody>$(hadolint_rows_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
+      </table>
+    </details>" || true)
+    $([ -s "$REPORT_DIR/hadolint.json" ] && echo "<div class='raw-link'>📄 <a href='hadolint.json' target='_blank'>${T_RAW_JSON}</a></div>" || true)
+  </div>
+</div>
+
 <footer>check.sh &nbsp;·&nbsp; ${T_FOOTER_GENERATED} $(date "+%Y-%m-%d %H:%M %Z")</footer>
 
 </div><!-- /page -->
@@ -924,25 +1352,27 @@ main() {
   fi
 
   # 2. Parse CLI flags (highest precedence — override .env)
-  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true
+  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true GENERATE_PDF=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --release)     TARGET_REF="$2"; shift ;;
-      --no-semgrep)  RUN_SEMGREP=false ;;
-      --no-trivy)    RUN_TRIVY=false ;;
-      --no-vt)       RUN_VT=false ;;
-      --vt-key)      VT_API_KEY="$2"; shift ;;
-      --lang)        LANG_REPORT="$2"; shift ;;
+      --release)      TARGET_REF="$2"; shift ;;
+      --no-semgrep)   RUN_SEMGREP=false ;;
+      --no-trivy)     RUN_TRIVY=false ;;
+      --no-vt)        RUN_VT=false ;;
+      --no-hadolint)  RUN_HADOLINT=false ;;
+      --pdf)          GENERATE_PDF=true ;;
+      --vt-key)       VT_API_KEY="$2"; shift ;;
+      --lang)         LANG_REPORT="$2"; shift ;;
       *) log_warn "Unknown option: $1" ;;
     esac
     shift
   done
 
   echo -e "${BOLD}${CYAN}"
-  echo "╔══════════════════════════════════════════════╗"
-  echo "║   OSS Security Scanner                       ║"
-  echo "║   VirusTotal · Semgrep · Trivy               ║"
-  echo "╚══════════════════════════════════════════════╝"
+  echo "╔══════════════════════════════════════════════════╗"
+  echo "║   OSS Security Scanner                         ║"
+  echo "║   VirusTotal · Semgrep · Trivy · Hadolint      ║"
+  echo "╚══════════════════════════════════════════════════╝"
   echo -e "${NC}"
   log_info "Target : $TARGET"
   [[ -n "$TARGET_REF" ]] && log_info "Ref    : $TARGET_REF" || log_info "Ref    : HEAD (default branch)"
@@ -951,16 +1381,17 @@ main() {
   check_deps
   setup_workdir
   # Always generate HTML report on exit — even if a scanner crashes
-  trap 'generate_report 2>/dev/null || true; generate_pdf 2>/dev/null || true; cleanup' EXIT
+  trap 'generate_report 2>/dev/null || true; [[ "$GENERATE_PDF" == true ]] && generate_pdf 2>/dev/null || true; cleanup' EXIT
 
   clone_repo
 
-  [[ "$RUN_SEMGREP" == true ]] && run_semgrep || true
-  [[ "$RUN_TRIVY"   == true ]] && run_trivy   || true
-  [[ "$RUN_VT"      == true ]] && run_virustotal || true
+  [[ "$RUN_SEMGREP"   == true ]] && run_semgrep     || true
+  [[ "$RUN_TRIVY"     == true ]] && run_trivy       || true
+  [[ "$RUN_VT"        == true ]] && run_virustotal  || true
+  [[ "$RUN_HADOLINT"  == true ]] && run_hadolint    || true
 
   generate_report
-  generate_pdf
+  [[ "$GENERATE_PDF" == true ]] && generate_pdf
 
   local overall
   overall=$(overall_status)
@@ -969,9 +1400,10 @@ main() {
   echo -e "  VirusTotal  : $(term_badge "$VT_STATUS")  malicious=$VT_MALICIOUS/$VT_TOTAL"
   echo -e "  Semgrep     : $(term_badge "$SEMGREP_STATUS")  findings=$SEMGREP_FINDINGS"
   echo -e "  Trivy       : $(term_badge "$TRIVY_STATUS")  critical=$TRIVY_CRITICAL  high=$TRIVY_HIGH  secrets=$TRIVY_SECRETS"
+  echo -e "  Hadolint    : $(term_badge "$HADOLINT_STATUS")  files=$HADOLINT_FILES  errors=$HADOLINT_ERRORS  warnings=$HADOLINT_WARNINGS"
   echo ""
   echo -e "  ${BOLD}HTML:${NC} file://$REPORT_DIR/report.html"
-  [[ -f "$REPORT_DIR/report.pdf" ]] && echo -e "  ${BOLD}PDF :${NC} file://$REPORT_DIR/report.pdf"
+  [[ "$GENERATE_PDF" == true && -f "$REPORT_DIR/report.pdf" ]] && echo -e "  ${BOLD}PDF :${NC} file://$REPORT_DIR/report.pdf"
   echo ""
 }
 
