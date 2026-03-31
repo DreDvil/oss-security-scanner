@@ -536,10 +536,10 @@ trivy_rows_html() {
   jq -r '.Results[]? | .Vulnerabilities[]? |
     "<tr>
       <td class=\"sev-\(.Severity | ascii_downcase)\">\(.Severity)</td>
-      <td><code>\(.VulnerabilityID)</code></td>
+      <td class=\"col-cve\"><a href=\"\(if .VulnerabilityID | startswith("GHSA-") then "https://github.com/advisories/" else "https://nvd.nist.gov/vuln/detail/" end)\(.VulnerabilityID)\" target=\"_blank\" class=\"cve-link\"><code>\(.VulnerabilityID)</code></a></td>
       <td>\(.PkgName) \(.InstalledVersion // "")</td>
       <td>\(.FixedVersion // "—")</td>
-      <td>\(.Title // "N/A" | gsub("<";"&lt;") | gsub(">";"&gt;") | .[0:100])</td>
+      <td class=\"desc-cell\">\(.Title // "N/A" | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/trivy_fs.json" 2>/dev/null | head -200 || true
 }
 
@@ -1044,7 +1044,7 @@ generate_report() {
     border-bottom:2px solid var(--border);
     font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;
   }
-  td{padding:0.3rem 0.7rem;border-bottom:1px solid var(--border);vertical-align:top}
+  td{padding:0.3rem 0.7rem;border-bottom:1px solid var(--border);vertical-align:top;overflow-wrap:break-word;word-break:break-word}
   tr:last-child td{border-bottom:none}
   tr:hover td{background:var(--surface2)}
   code{color:var(--code);font-size:0.8rem;font-family:"SF Mono",Menlo,monospace}
@@ -1059,6 +1059,8 @@ generate_report() {
   .loc-cell{white-space:normal;word-break:break-all;max-width:220px}
   .loc-link{color:#60a5fa;font-family:"SF Mono",Menlo,monospace;font-size:0.78rem}
   .loc-link:hover{color:#93c5fd;text-decoration:underline}
+  .cve-link{color:inherit;text-decoration:none}
+  .cve-link:hover code{text-decoration:underline;color:#93c5fd}
 
   /* ── Description cell ── */
   .desc-cell{white-space:normal;word-break:break-word}
@@ -1070,6 +1072,10 @@ generate_report() {
   .tbl-fixed{table-layout:fixed}
   .col-num{width:38px}
   .col-sev{width:11%}
+  .col-cve{width:165px;white-space:nowrap}
+  .col-cve code{white-space:nowrap}
+  .col-pkg{width:22%}
+  .col-fix{width:11%}
   .col-rule{width:22%}
   .col-loc{width:22%}
   /* col-desc gets remaining space automatically */
@@ -1276,7 +1282,8 @@ generate_report() {
     $([ "$(( TRIVY_CRITICAL + TRIVY_HIGH + TRIVY_MEDIUM + TRIVY_LOW ))" -gt 0 ] && echo "
     <details open>
       <summary>${T_TRIVY_VULN_LABEL} — ${TRIVY_CRITICAL} critical &nbsp;/&nbsp; ${TRIVY_HIGH} high &nbsp;/&nbsp; ${TRIVY_MEDIUM} medium &nbsp;/&nbsp; ${TRIVY_LOW} low</summary>
-      <table>
+      <table class="tbl-fixed">
+        <colgroup><col class="col-sev"><col class="col-cve"><col class="col-pkg"><col class="col-fix"><col></colgroup>
         <thead><tr><th>${T_TRIVY_TH_SEV}</th><th>${T_TRIVY_TH_CVE}</th><th>${T_TRIVY_TH_PKG}</th><th>${T_TRIVY_TH_FIX}</th><th>${T_TRIVY_TH_TITLE}</th></tr></thead>
         <tbody>$(trivy_rows_html)</tbody>
       </table>
