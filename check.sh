@@ -221,7 +221,8 @@ run_semgrep() {
   local out="$REPORT_DIR/semgrep.json"
   local semgrep_log="$REPORT_DIR/semgrep.log"
 
-  # Level 1: --config=auto  (downloads optimal rules per language from semgrep.dev)
+  # Level 1: --config=auto (cloud rules from semgrep.dev).
+  # NOTE: auto-config is incompatible with --metrics=off — omit that flag here.
   log_info "Trying semgrep auto-config (cloud rules)…"
   docker run --rm \
     -v "$WORK_DIR/source:/src:ro" \
@@ -229,17 +230,16 @@ run_semgrep() {
     semgrep scan \
       --config=auto \
       --json \
-      --metrics=off \
       --exclude 'Dockerfile*' \
       --exclude '*.dockerfile' \
       /src > "$out" 2>"$semgrep_log" || true
 
-  # Level 2: auto failed → smart multi-ruleset based on detected languages
+  # Level 2: auto failed → smart multi-ruleset based on detected languages.
+  # These rulesets are downloaded from semgrep.dev; may fail when offline.
   if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
     log_info "Auto-config unavailable — detecting project languages…"
     local cfgs
     cfgs=$(_semgrep_configs)
-    # Build --config=xxx args (space-separated, no spaces inside each entry)
     local config_args=""
     for c in $cfgs; do
       config_args="$config_args --config=$c"
@@ -258,15 +258,15 @@ run_semgrep() {
         /src > "$out" 2>>"$semgrep_log" || true
   fi
 
-  # Level 3: p/default is always bundled inside the semgrep Docker image (works offline).
-  # Run it if: (a) previous levels produced no output, OR (b) Level 2 found 0 findings
-  # (Level 2 rulesets need semgrep.dev — if the network failed they silently load 0 rules).
+  # Level 3: p/default fallback — run when previous levels produced no valid output
+  # OR found 0 findings (network rules may have silently loaded 0 rules on timeout).
   local l3_out="$REPORT_DIR/semgrep_default.json"
   local run_l3=false
   if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
+    log_info "Levels 1-2 produced no output — trying p/default fallback…"
     run_l3=true
   elif [[ "$(jq '[.results[]] | length' "$out" 2>/dev/null || echo 0)" -eq 0 ]]; then
-    log_info "Level 2 found 0 findings — also running bundled p/default to verify"
+    log_info "Level 2 found 0 findings — also running p/default to verify"
     run_l3=true
   fi
 
@@ -282,10 +282,8 @@ run_semgrep() {
         --exclude '*.dockerfile' \
         /src > "$l3_out" 2>>"$semgrep_log" || true
 
-    # Merge Level 3 into main output
     if [[ -s "$l3_out" ]] && jq -e '.results' "$l3_out" &>/dev/null; then
       if [[ -s "$out" ]] && jq -e '.results' "$out" &>/dev/null; then
-        # Merge: combine .results and .errors arrays from both files
         jq -s '{ results: (.[0].results + .[1].results | unique_by(.check_id + .path + (.start.line | tostring))), errors: (.[0].errors + .[1].errors) }' \
           "$out" "$l3_out" > "$out.merged" && mv "$out.merged" "$out"
       else
@@ -295,8 +293,14 @@ run_semgrep() {
   fi
 
   if [[ ! -s "$out" ]] || ! jq -e '.results' "$out" &>/dev/null; then
-    log_warn "Semgrep produced no usable output — see semgrep.log"
-    SEMGREP_STATUS="error"
+    # Check if the failure is due to network issues (semgrep.dev unreachable)
+    if grep -q "Read timed out\|ConnectionError\|semgrep.dev" "$semgrep_log" 2>/dev/null; then
+      log_warn "Semgrep failed: semgrep.dev unreachable (network timeout). Scan skipped."
+      SEMGREP_STATUS="error"
+    else
+      log_warn "Semgrep produced no usable output — see semgrep.log"
+      SEMGREP_STATUS="error"
+    fi
     return
   fi
 
@@ -765,7 +769,7 @@ setup_lang() {
     T_VT_TH_COUNT="Кол-во"
     T_VT_RAW="Сырой вывод vt-cli"
     T_SEMGREP_CLEAN="✓ Проблем не найдено"
-    T_SEMGREP_ERROR="Ошибка сканера — проверьте логи Docker"
+    T_SEMGREP_ERROR="Semgrep недоступен — semgrep.dev не отвечает (таймаут). Проверьте интернет-соединение и повторите сканирование."
     T_SEMGREP_FINDINGS_LABEL="найдено (показаны первые 50)"
     T_SEMGREP_TH_SEV="Серьёзность"
     T_SEMGREP_TH_RULE="Правило"
@@ -822,7 +826,7 @@ setup_lang() {
     T_VT_TH_COUNT="Count"
     T_VT_RAW="Raw vt-cli output"
     T_SEMGREP_CLEAN="✓ No findings"
-    T_SEMGREP_ERROR="Scanner error — check Docker logs"
+    T_SEMGREP_ERROR="Semgrep unavailable — semgrep.dev unreachable (network timeout). Check your internet connection and retry."
     T_SEMGREP_FINDINGS_LABEL="finding(s) — showing up to 50"
     T_SEMGREP_TH_SEV="Severity"
     T_SEMGREP_TH_RULE="Rule"
