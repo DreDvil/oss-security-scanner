@@ -1,0 +1,17 @@
+# Secrets
+.env
+
+# Build artifacts & reports
+reports/
+*.tar.gz
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Claude
+.claude/
+
+# Docker build cache
+*.dockerfile.bak
