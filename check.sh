@@ -110,19 +110,30 @@ parse_github_url() {
 
 # ── Clone repository ──────────────────────────────────────────────────────────
 clone_repo() {
+  local clone_timeout=300
   if [[ -n "$TARGET_REF" ]]; then
-    log_info "Cloning $TARGET @ ${TARGET_REF} …"
-    git clone --depth 1 --branch "$TARGET_REF" --quiet "$TARGET" "$WORK_DIR/source" 2>&1 || {
-      log_error "Failed to clone repository at ref '${TARGET_REF}' — check tag/branch name"
+    log_info "Cloning $TARGET @ ${TARGET_REF} (timeout ${clone_timeout}s)…"
+    if ! timeout "$clone_timeout" git clone --depth 1 --branch "$TARGET_REF" --quiet "$TARGET" "$WORK_DIR/source" 2>&1; then
+      local ec=$?
+      if [[ $ec -eq 124 ]]; then
+        log_error "git clone timed out after ${clone_timeout}s"
+      else
+        log_error "Failed to clone repository at ref '${TARGET_REF}' — check tag/branch name"
+      fi
       exit 1
-    }
+    fi
     log_ok "Cloned tag/branch: ${TARGET_REF}"
   else
-    log_info "Cloning $TARGET (default branch) …"
-    git clone --depth 1 --quiet "$TARGET" "$WORK_DIR/source" 2>&1 || {
-      log_error "Failed to clone repository"
+    log_info "Cloning $TARGET (default branch, timeout ${clone_timeout}s)…"
+    if ! timeout "$clone_timeout" git clone --depth 1 --quiet "$TARGET" "$WORK_DIR/source" 2>&1; then
+      local ec=$?
+      if [[ $ec -eq 124 ]]; then
+        log_error "git clone timed out after ${clone_timeout}s"
+      else
+        log_error "Failed to clone repository"
+      fi
       exit 1
-    }
+    fi
     log_ok "Cloned HEAD of default branch"
   fi
 }
@@ -221,10 +232,12 @@ run_semgrep() {
   local out="$REPORT_DIR/semgrep.json"
   local semgrep_log="$REPORT_DIR/semgrep.log"
 
+  local semgrep_timeout=900  # 15 min — large codebases can take a while
+
   # Level 1: --config=auto (cloud rules from semgrep.dev).
   # NOTE: auto-config is incompatible with --metrics=off — omit that flag here.
-  log_info "Trying semgrep auto-config (cloud rules)…"
-  docker run --rm \
+  log_info "Trying semgrep auto-config (cloud rules, timeout ${semgrep_timeout}s)…"
+  timeout "$semgrep_timeout" docker run --rm \
     -v "$WORK_DIR/source:/src:ro" \
     "$SEMGREP_IMAGE" \
     semgrep scan \
@@ -246,7 +259,7 @@ run_semgrep() {
     done
     log_info "Running with rulesets: $cfgs"
     # shellcheck disable=SC2086
-    docker run --rm \
+    timeout "$semgrep_timeout" docker run --rm \
       -v "$WORK_DIR/source:/src:ro" \
       "$SEMGREP_IMAGE" \
       semgrep scan \
@@ -271,7 +284,7 @@ run_semgrep() {
   fi
 
   if [[ "$run_l3" == true ]]; then
-    docker run --rm \
+    timeout "$semgrep_timeout" docker run --rm \
       -v "$WORK_DIR/source:/src:ro" \
       "$SEMGREP_IMAGE" \
       semgrep scan \
@@ -325,8 +338,10 @@ run_trivy() {
   log_section "Trivy — Dependency & Secret Scan"
 
   local out="$REPORT_DIR/trivy_fs.json"
+  local trivy_timeout=600  # 10 min
 
-  docker run --rm \
+  log_info "Running Trivy (timeout ${trivy_timeout}s)…"
+  if ! timeout "$trivy_timeout" docker run --rm \
     -v "$WORK_DIR/source:/target:ro" \
     -v "$REPORT_DIR:/reports" \
     "$TRIVY_IMAGE" \
@@ -335,7 +350,14 @@ run_trivy() {
       --output /reports/trivy_fs.json \
       --scanners vuln,secret,misconfig \
       --quiet \
-      /target 2>/dev/null || true
+      /target 2>/dev/null; then
+    local ec=$?
+    if [[ $ec -eq 124 ]]; then
+      log_warn "Trivy timed out after ${trivy_timeout}s"
+    else
+      log_warn "Trivy exited with code $ec"
+    fi
+  fi
 
   if [[ ! -s "$out" ]]; then
     log_warn "Trivy produced no output"
@@ -437,27 +459,38 @@ run_virustotal() {
   sha256=$(sha256sum "$archive" | awk '{print $1}')
   log_info "SHA256: $sha256"
 
-  local vt_out
-  # vt-cli reads the key from -k/--apikey flag (NOT VT_API_KEY env var)
+  # SEC-3: write API key to a temp config file so it never appears in `ps aux`
+  local vt_cfg_dir vt_out
+  vt_cfg_dir=$(mktemp -d /tmp/vt_cfg_XXXXXX)
+  chmod 700 "$vt_cfg_dir"
+  printf 'apikey = "%s"\n' "$VT_API_KEY" > "$vt_cfg_dir/vt.toml"
+  chmod 600 "$vt_cfg_dir/vt.toml"
+
   vt_out=$(docker run --rm \
+    -v "$vt_cfg_dir/vt.toml:/root/.vt.toml:ro" \
     "$VT_IMAGE_LOCAL" \
-    -k "$VT_API_KEY" file "$sha256" 2>&1 || true)
+    file "$sha256" 2>&1 || true)
 
   if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404'; then
     # Not in VT database — upload and wait for results
     log_info "Not in VT database — uploading and scanning (--wait)…"
     vt_out=$(docker run --rm \
       -v "$WORK_DIR:/work:ro" \
+      -v "$vt_cfg_dir/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
-      -k "$VT_API_KEY" scan file --wait /work/source.tar.gz 2>&1 || true)
+      scan file --wait /work/source.tar.gz 2>&1 || true)
     log_info "Analysis complete"
   elif echo "$vt_out" | grep -qiE 'API key|apikey|invalid|forbidden|401|403'; then
     log_error "VirusTotal API key error: $(echo "$vt_out" | head -1)"
+    rm -rf "$vt_cfg_dir"
     VT_STATUS="error"
     return
   else
     log_ok "Found in VirusTotal cache"
   fi
+
+  # Remove temp config dir (key no longer needed)
+  rm -rf "$vt_cfg_dir"
 
   # Save raw output (includes full vt-cli YAML-like response)
   echo "$vt_out" > "$REPORT_DIR/virustotal.txt"
@@ -1347,18 +1380,27 @@ main() {
   [[ -z "$TARGET" ]] && usage
   shift
 
-  # Validate target looks like a GitHub URL
-  if [[ "$TARGET" != https://github.com/* ]]; then
-    log_error "Target must be a GitHub URL (https://github.com/owner/repo)"
+  # Strict validation: only allow well-formed GitHub repo URLs
+  if ! [[ "$TARGET" =~ ^https://github\.com/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(\.git)?/?$ ]]; then
+    log_error "Invalid GitHub URL. Expected: https://github.com/owner/repo"
     exit 1
   fi
 
-  # 1. Load .env (lowest precedence: environment file)
+  # 1. Load .env safely — parse KEY=VALUE lines only, never execute arbitrary code
   local env_file
   env_file="$(dirname "$0")/.env"
   if [[ -f "$env_file" ]]; then
-    # shellcheck source=/dev/null
-    source "$env_file"
+    while IFS='=' read -r key value; do
+      # Accept only UPPER_CASE env var names; skip comments and blank lines
+      [[ "$key" =~ ^[A-Z_][A-Z0-9_]*$ ]] || continue
+      [[ -n "$value" ]] || continue
+      # Strip optional surrounding quotes from value
+      value="${value%\"}"
+      value="${value#\"}"
+      value="${value%\'}"
+      value="${value#\'}"
+      export "$key=$value"
+    done < <(grep -E '^[A-Z_][A-Z0-9_]*=' "$env_file" | grep -v '^#')
     log_info "Loaded $env_file"
   fi
 
@@ -1366,7 +1408,12 @@ main() {
   local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true GENERATE_PDF=false
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --release)      TARGET_REF="$2"; shift ;;
+      --release)
+        if ! [[ "$2" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+          log_error "Invalid --release value: '$2' (allowed: a-z A-Z 0-9 . _ / -)"
+          exit 1
+        fi
+        TARGET_REF="$2"; shift ;;
       --no-semgrep)   RUN_SEMGREP=false ;;
       --no-trivy)     RUN_TRIVY=false ;;
       --no-vt)        RUN_VT=false ;;
