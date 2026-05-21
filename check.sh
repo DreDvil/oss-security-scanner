@@ -567,7 +567,7 @@ semgrep_rows_html() {
       <td class=\"num\">\($i + 1)</td>
       <td class=\"sev-\(.extra.severity | sev_css)\">\(.extra.severity | sev_label)</td>
       <td><code class=\"rule-id\">\(.check_id)</code></td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/"))#L\(.start.line)\" target=\"_blank\" class=\"loc-link\">\(.path | ltrimstr("/src/")):\(.start.line)</a></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/"))#L\(.start.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.path | ltrimstr("/src/")):\(.start.line)</a></td>
       <td class=\"desc-cell\">\(.extra.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/semgrep.json" 2>/dev/null || true
 }
@@ -577,7 +577,7 @@ trivy_rows_html() {
   jq -r '.Results[]? | .Vulnerabilities[]? |
     "<tr>
       <td class=\"sev-\(.Severity | ascii_downcase)\">\(.Severity)</td>
-      <td class=\"col-cve\"><a href=\"\(if .VulnerabilityID | startswith("GHSA-") then "https://github.com/advisories/" else "https://nvd.nist.gov/vuln/detail/" end)\(.VulnerabilityID)\" target=\"_blank\" class=\"cve-link\"><code>\(.VulnerabilityID)</code></a></td>
+      <td class=\"col-cve\"><a href=\"\(if .VulnerabilityID | startswith("GHSA-") then "https://github.com/advisories/" else "https://nvd.nist.gov/vuln/detail/" end)\(.VulnerabilityID)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"cve-link\"><code>\(.VulnerabilityID)</code></a></td>
       <td>\(.PkgName) \(.InstalledVersion // "")</td>
       <td>\(.FixedVersion // "—")</td>
       <td class=\"desc-cell\">\(.Title // "N/A" | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
@@ -593,7 +593,7 @@ trivy_secrets_html() {
     "<tr>
       <td class=\"sev-\(.Severity | ascii_downcase)\">\(.Severity)</td>
       <td>\(.Title | gsub("<";"&lt;"))</td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target)\" target=\"_blank\" class=\"loc-link\">\($r.Target)</a></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\($r.Target)</a></td>
       <td class=\"desc-cell\"><code>\(.Match | gsub("<";"&lt;") | .[0:120])</code></td>
     </tr>"' "$REPORT_DIR/trivy_fs.json" 2>/dev/null || true
 }
@@ -671,7 +671,7 @@ hadolint_rows_html() {
       <td class=\"num\">\($i + 1)</td>
       <td class=\"sev-\(if .level=="error" then "error" elif .level=="warning" then "warning" else "info" end)\">\(.level | ascii_upcase)</td>
       <td><code class=\"rule-id\">\(.code)</code></td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\(.file | ltrimstr("/src/"))#L\(.line)\" target=\"_blank\" class=\"loc-link\">\(.file | ltrimstr("/src/")):\(.line)</a></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.file | ltrimstr("/src/"))#L\(.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.file | ltrimstr("/src/")):\(.line)</a></td>
       <td class=\"desc-cell\">\(.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/hadolint.json" 2>/dev/null | head -200 || true
 }
@@ -680,9 +680,9 @@ vt_meta_html() {
   local f="$REPORT_DIR/virustotal.txt"
   [[ ! -s "$f" ]] && return
   local sha256 md5 sha1 size type_desc meaningful_name rep times_sub unique_src first_sub last_scan
-  sha256=$(         awk '/^[[:space:]]+sha256:/{print $2; exit}' "$f")
-  md5=$(            awk '/^[[:space:]]+md5:/{print $2; exit}' "$f")
-  sha1=$(           awk '/^[[:space:]]+sha1:/{print $2; exit}' "$f")
+  sha256=$(         awk '/^[[:space:]]+sha256:/{gsub(/"/, "", $2); print $2; exit}' "$f")
+  md5=$(            awk '/^[[:space:]]+md5:/{gsub(/"/, "", $2); print $2; exit}' "$f")
+  sha1=$(           awk '/^[[:space:]]+sha1:/{gsub(/"/, "", $2); print $2; exit}' "$f")
   size=$(           awk '/^[[:space:]]+size:/{print $2+0; exit}' "$f")
   type_desc=$(      awk '/^[[:space:]]+type_description:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
   meaningful_name=$(awk '/^[[:space:]]+meaningful_name:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
@@ -701,7 +701,7 @@ vt_meta_html() {
     elif [[ "$size" -gt 1048576    ]]; then size_fmt="$(( size/1024/1024 )) MB"
     else                                    size_fmt="$(( size/1024 )) KB"
     fi
-    size_fmt="$size_fmt &nbsp;<span style='color:var(--muted);font-size:0.75rem'>(${size} bytes)</span>"
+    size_fmt="$size_fmt &nbsp;<span class='vt-sub'>(${size} bytes)</span>"
   fi
 
   # Format epoch → human date (macOS: date -r / Linux: date -d @)
@@ -727,7 +727,7 @@ vt_meta_html() {
   <div class="vt-meta-row"><span class="vt-mk">File size</span><span>${size_fmt}</span></div>
   <div class="vt-meta-row"><span class="vt-mk">Name (VT)</span><span>${meaningful_name:-—}</span></div>
   <div class="vt-meta-row"><span class="vt-mk">Reputation</span><span${rep_cls}>${rep_val}</span></div>
-  <div class="vt-meta-row"><span class="vt-mk">Times submitted</span><span>${times_sub:-—} &nbsp;<span style='color:var(--muted);font-size:0.75rem'>(${unique_src:-?} unique source(s))</span></span></div>
+  <div class="vt-meta-row"><span class="vt-mk">Times submitted</span><span>${times_sub:-—} &nbsp;<span class='vt-sub'>(${unique_src:-?} unique source(s))</span></span></div>
   <div class="vt-meta-row"><span class="vt-mk">First seen</span><span>${first_sub_fmt:-—}</span></div>
   <div class="vt-meta-row"><span class="vt-mk">Last scan</span><span>${last_scan_fmt:-—}</span></div>
 </div>
@@ -993,6 +993,24 @@ generate_report() {
   vt_badge=$(status_badge "$VT_STATUS")
   hadolint_badge=$(status_badge "$HADOLINT_STATUS")
 
+  # Pre-compute Hadolint INFO count for status bar
+  local hadolint_info=$(( HADOLINT_TOTAL - HADOLINT_ERRORS - HADOLINT_WARNINGS ))
+
+  # Pre-compute VT engines block (adds empty-state message when 0 engines flagged)
+  local vt_engines_block=""
+  if [[ -s "$REPORT_DIR/virustotal.txt" ]]; then
+    local _engines _empty_msg="" _open_attr=""
+    _engines=$(vt_engines_html)
+    [[ -z "$_engines" && "$VT_TOTAL" -gt 0 ]] && _empty_msg="<p class=\"msg ok\" style=\"margin-top:0.5rem\">No engines flagged this file as malicious or suspicious.</p>"
+    [[ "$VT_MALICIOUS" -gt 0 ]] && _open_attr=" open"
+    vt_engines_block="
+    <details${_open_attr}>
+      <summary>🔬 Security vendors' analysis — ${VT_MALICIOUS} / ${VT_TOTAL} engines detected</summary>
+      <div class='vt-engine-grid'>${_engines}</div>
+      ${_empty_msg}
+    </details>"
+  fi
+
   cat > "$REPORT_DIR/report.html" <<HTMLEOF
 <!DOCTYPE html>
 <html lang="en">
@@ -1005,7 +1023,10 @@ generate_report() {
     --pass:#22c55e; --warn:#f59e0b; --fail:#ef4444; --skip:#64748b;
     --bg:#080d18; --surface:#0f172a; --surface2:#162032;
     --border:#1e2d45; --text:#e2e8f0; --muted:#64748b; --code:#7dd3fc;
+    --sev-high:#f97316; --sev-info:#60a5fa; --loc-hover:#93c5fd;
     --r:12px;
+    --fs-xs:0.7rem; --fs-sm:0.8rem; --fs-body:0.85rem;
+    --fs-lg:1.4rem; --fs-hero:2.4rem;
   }
   *{box-sizing:border-box;margin:0;padding:0}
   body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
@@ -1021,7 +1042,7 @@ generate_report() {
     background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
     padding:1.75rem 1.5rem 1.5rem;text-align:center;margin-bottom:1.25rem;
   }
-  .hero h1{font-size:1.4rem;font-weight:800;letter-spacing:-0.4px;margin-bottom:1.25rem}
+  .hero h1{font-size:var(--fs-lg);font-weight:800;letter-spacing:-0.4px;margin-bottom:1.25rem}
 
   /* ── Hero info blocks (Target / Ref / Date) ── */
   .hero-info{display:flex;justify-content:center;gap:0.75rem;flex-wrap:wrap;margin-bottom:1.1rem}
@@ -1029,10 +1050,10 @@ generate_report() {
     background:var(--surface2);border:1px solid var(--border);border-radius:8px;
     padding:0.6rem 1.25rem;text-align:center;min-width:150px;
   }
-  .info-label{font-size:0.72rem;text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:0.35rem}
+  .info-label{font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:0.8px;color:var(--muted);margin-bottom:0.35rem}
   .info-val{font-size:1rem;font-weight:600;color:var(--text)}
   .info-val a{color:var(--code)}
-  .info-val code{font-size:0.95rem}
+  .info-val code{font-size:1rem}
 
   /* ── Verdict block ── */
   .verdict-block{
@@ -1042,12 +1063,12 @@ generate_report() {
   .verdict-block.verdict-pass{background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.28)}
   .verdict-block.verdict-warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28)}
   .verdict-block.verdict-fail{background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.28)}
-  .verdict-label{font-size:0.95rem;font-weight:800;letter-spacing:1.5px}
+  .verdict-label{font-size:1rem;font-weight:800;letter-spacing:1.5px}
   .verdict-block.verdict-pass .verdict-label{color:var(--pass)}
   .verdict-block.verdict-warn .verdict-label{color:var(--warn)}
   .verdict-block.verdict-fail .verdict-label{color:var(--fail)}
   .verdict-sep{width:1px;height:1.3rem;background:var(--border)}
-  .verdict-desc{font-size:0.82rem;color:var(--muted);text-align:left}
+  .verdict-desc{font-size:var(--fs-body);color:var(--muted);text-align:left}
 
   /* ── Metric strip ── */
   .metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:1.75rem}
@@ -1055,17 +1076,17 @@ generate_report() {
     background:var(--surface);border:1px solid var(--border);border-radius:var(--r);
     padding:1.4rem 1rem;text-align:center;
   }
-  .metric-label{font-size:0.68rem;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:0.6rem}
-  .metric-num{font-size:2.4rem;font-weight:800;line-height:1;margin-bottom:0.35rem}
+  .metric-label{font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:0.6rem}
+  .metric-num{font-size:var(--fs-hero);font-weight:800;line-height:1;margin-bottom:0.35rem}
   .metric-num.green{color:var(--pass)}
   .metric-num.yellow{color:var(--warn)}
   .metric-num.red{color:var(--fail)}
-  .metric-sub{font-size:0.75rem;color:var(--muted);margin-bottom:0.7rem}
+  .metric-sub{font-size:var(--fs-sm);color:var(--muted);margin-bottom:0.7rem}
 
   /* ── Badges ── */
   .badge{
-    display:inline-flex;align-items:center;gap:4px;
-    padding:3px 10px;border-radius:5px;font-size:0.68rem;font-weight:700;letter-spacing:0.6px;
+    display:inline-flex;align-items:center;gap:0.28rem;
+    padding:3px 10px;border-radius:5px;font-size:var(--fs-xs);font-weight:700;letter-spacing:0.6px;
   }
   .badge.pass{background:rgba(34,197,94,.12);color:var(--pass);border:1px solid rgba(34,197,94,.25)}
   .badge.warn{background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.25)}
@@ -1082,35 +1103,35 @@ generate_report() {
     padding:0.85rem 1.4rem;background:var(--surface2);
     border-bottom:1px solid var(--border);
   }
-  .mod-title{font-size:0.9rem;font-weight:700;display:flex;align-items:center;gap:0.5rem}
+  .mod-title{font-size:1rem;font-weight:700;display:flex;align-items:center;gap:0.5rem}
   .mod-icon{font-size:1rem}
   .mod-body{padding:1.25rem 1.5rem}
 
   /* ── Tables ── */
-  table{width:100%;border-collapse:collapse;font-size:0.83rem}
+  table{width:100%;border-collapse:collapse;font-size:var(--fs-sm)}
   th{
     background:var(--surface2);color:var(--muted);text-align:left;
     padding:0.5rem 0.75rem;font-weight:600;
     border-bottom:2px solid var(--border);
-    font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;
+    font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:0.5px;
   }
   td{padding:0.3rem 0.7rem;border-bottom:1px solid var(--border);vertical-align:top;overflow-wrap:break-word;word-break:break-word}
   tr:last-child td{border-bottom:none}
   tr:hover td{background:var(--surface2)}
-  code{color:var(--code);font-size:0.8rem;font-family:"SF Mono",Menlo,monospace}
+  code{color:var(--code);font-size:var(--fs-sm);font-family:"SF Mono",Menlo,monospace}
 
   /* ── Row number column ── */
-  .num{width:38px;text-align:center !important;color:var(--muted);font-size:0.75rem;font-variant-numeric:tabular-nums}
+  .num{width:38px;text-align:center !important;color:var(--muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
 
   /* ── Rule ID (grey, not a link) ── */
   .rule-id{color:var(--muted)}
 
   /* ── Location link (blue, clearly clickable) ── */
   .loc-cell{white-space:normal;word-break:break-all;max-width:220px}
-  .loc-link{color:#60a5fa;font-family:"SF Mono",Menlo,monospace;font-size:0.78rem}
-  .loc-link:hover{color:#93c5fd;text-decoration:underline}
+  .loc-link{color:var(--sev-info);font-family:"SF Mono",Menlo,monospace;font-size:var(--fs-sm)}
+  .loc-link:hover{color:var(--loc-hover);text-decoration:underline}
   .cve-link{color:inherit;text-decoration:none}
-  .cve-link:hover code{text-decoration:underline;color:#93c5fd}
+  .cve-link:hover code{text-decoration:underline;color:var(--loc-hover)}
 
   /* ── Description cell ── */
   .desc-cell{white-space:normal;word-break:break-word}
@@ -1133,74 +1154,86 @@ generate_report() {
 
   /* ── Severity ── */
   .sev-critical{color:var(--fail);font-weight:700}
-  .sev-high{color:#f97316;font-weight:600}
+  .sev-high{color:var(--sev-high);font-weight:600}
   .sev-medium{color:var(--warn)}
   .sev-low{color:var(--muted)}
   .sev-error{color:var(--fail);font-weight:700}
   .sev-warning{color:var(--warn)}
-  .sev-info{color:#60a5fa}
+  .sev-info{color:var(--sev-info)}
 
   /* ── Accordion ── */
   details{margin-bottom:0.6rem}
   summary{
-    cursor:pointer;padding:0.55rem 0;font-weight:600;font-size:0.88rem;
+    cursor:pointer;padding:0.55rem 0;font-weight:600;font-size:var(--fs-body);
     list-style:none;display:flex;align-items:center;gap:0.5rem;user-select:none;
   }
   summary::-webkit-details-marker{display:none}
-  summary::before{content:"▶";font-size:0.6rem;color:var(--muted);transition:transform .18s;flex-shrink:0}
+  summary::before{content:"▶";font-size:var(--fs-xs);color:var(--muted);transition:transform .18s;flex-shrink:0}
   details[open] summary::before{transform:rotate(90deg)}
 
   /* ── Status messages ── */
-  .msg{padding:0.6rem 0;font-size:0.88rem}
+  .msg{padding:0.6rem 0;font-size:var(--fs-body)}
   .msg.ok{color:var(--pass)}
   .msg.warn{color:var(--warn)}
   .msg.muted{color:var(--muted);font-style:italic}
 
   /* ── VT metadata ── */
   .vt-meta{margin-bottom:1.25rem;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-  .vt-meta-row{display:flex;gap:1rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border);align-items:baseline;font-size:0.83rem}
+  .vt-meta-row{display:flex;gap:1rem;padding:0.4rem 0.9rem;border-bottom:1px solid var(--border);align-items:baseline;font-size:var(--fs-sm)}
   .vt-meta-row:last-child{border-bottom:none}
   .vt-meta-row:nth-child(odd){background:rgba(255,255,255,.015)}
-  .vt-mk{font-size:0.68rem;text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);min-width:130px;flex-shrink:0;padding-top:1px}
-  .vt-hash{word-break:break-all;font-size:0.72rem;color:var(--code)}
+  .vt-mk{font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:0.6px;color:var(--muted);min-width:130px;flex-shrink:0;padding-top:1px}
+  .vt-hash{word-break:break-all;font-size:var(--fs-sm);color:var(--code)}
+  .vt-sub{color:var(--muted);font-size:var(--fs-sm)}
 
   /* ── VT engine grid (Security vendors' analysis) ── */
   .vt-engine-grid{display:grid;grid-template-columns:1fr 1fr;gap:0.3rem;margin-top:0.6rem}
-  .vt-eng{display:flex;justify-content:space-between;align-items:center;padding:0.3rem 0.7rem;background:var(--surface2);border-radius:4px;font-size:0.8rem;border:1px solid transparent}
+  .vt-eng{display:flex;justify-content:space-between;align-items:center;padding:0.3rem 0.7rem;background:var(--surface2);border-radius:4px;font-size:var(--fs-sm);border:1px solid transparent}
   .vt-eng[data-cat="malicious"]{background:rgba(239,68,68,.08);border-color:rgba(239,68,68,.28)}
   .vt-eng[data-cat="suspicious"]{background:rgba(245,158,11,.07);border-color:rgba(245,158,11,.28)}
-  .vt-eng-name{color:var(--text);font-size:0.78rem;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .vt-eng-verdict{font-size:0.71rem;font-weight:600;padding:1px 7px;border-radius:3px;white-space:nowrap;margin-left:0.5rem;flex-shrink:0}
+  .vt-eng-name{color:var(--text);font-size:var(--fs-sm);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vt-eng-verdict{font-size:var(--fs-xs);font-weight:600;padding:1px 7px;border-radius:3px;white-space:nowrap;margin-left:0.5rem;flex-shrink:0}
   .vt-v-malicious{color:var(--fail);background:rgba(239,68,68,.18)}
   .vt-v-suspicious{color:var(--warn);background:rgba(245,158,11,.18)}
   .vt-v-harmless{color:var(--pass);background:rgba(34,197,94,.1)}
   .vt-v-undetected{color:var(--muted)}
-  .vt-v-timeout,.vt-v-unsupported{color:var(--muted);font-style:italic;font-size:0.68rem}
+  .vt-v-timeout,.vt-v-unsupported{color:var(--muted);font-style:italic;font-size:var(--fs-xs)}
 
   /* ── Raw link ── */
-  .raw-link{display:block;margin-top:0.75rem;font-size:0.78rem;color:var(--muted)}
+  .raw-link{display:block;margin-top:0.75rem;font-size:var(--fs-sm);color:var(--muted)}
   .raw-link a{color:var(--muted)}
   .raw-link a:hover{color:var(--code)}
 
   /* ── Footer ── */
   footer{
     text-align:center;padding:1.5rem 0;
-    color:var(--muted);font-size:0.78rem;
+    color:var(--muted);font-size:var(--fs-sm);
     border-top:1px solid var(--border);margin-top:0.5rem;
   }
+
+  /* ── Keyboard focus ── */
+  a:focus-visible,summary:focus-visible{outline:2px solid var(--code);outline-offset:2px;border-radius:2px}
+
+  /* ── Table horizontal scroll ── */
+  .tbl-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 
   @media(max-width:700px){
     .metrics{grid-template-columns:repeat(2,1fr)}
     .vt-engine-grid{grid-template-columns:1fr}
-  }
-  @media(max-width:480px){
-    .metrics{grid-template-columns:1fr}
   }
   @media(max-width:600px){
     .hero-info{flex-direction:column;align-items:center}
     .verdict-block{flex-direction:column;gap:0.5rem;text-align:center}
     .verdict-sep{display:none}
     .verdict-desc{text-align:center}
+  }
+  @media(max-width:560px){
+    .metrics{grid-template-columns:repeat(2,1fr)}
+    .tbl-fixed{font-size:0.75rem}
+    .col-loc{width:18%}
+  }
+  @media(max-width:480px){
+    .metrics{grid-template-columns:1fr}
   }
 </style>
 </head>
@@ -1215,7 +1248,7 @@ generate_report() {
   <div class="hero-info">
     <div class="info-block">
       <div class="info-label">${T_LABEL_TARGET}</div>
-      <div class="info-val"><a href="${TARGET}" target="_blank">${gh_repo}</a></div>
+      <div class="info-val"><a href="${TARGET}" target="_blank" rel="noopener noreferrer">${gh_repo}</a></div>
     </div>
     <div class="info-block">
       <div class="info-label">${T_LABEL_REF}</div>
@@ -1268,7 +1301,7 @@ generate_report() {
      ══════════════════════════════════════ -->
 <div class="module">
   <div class="mod-head">
-    <div class="mod-title"><span class="mod-icon">🦠</span> ${T_VT_MODULE_TITLE} <span style="color:var(--muted);font-weight:400;font-size:0.78rem">(vt-cli)</span></div>
+    <div class="mod-title"><span class="mod-icon">🦠</span> ${T_VT_MODULE_TITLE} <span style="color:var(--muted);font-weight:400;font-size:var(--fs-sm)">(vt-cli)</span></div>
     ${vt_badge}
   </div>
   <div class="mod-body">
@@ -1278,18 +1311,14 @@ generate_report() {
     $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "$(vt_meta_html)" || true)
     $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "
     <details open>
-      <summary>${T_VT_TH_CATEGORY} — ${T_VT_TH_COUNT}</summary>
-      <table>
+      <summary>Detection categories</summary>
+      <div class='tbl-wrap'><table>
         <thead><tr><th>${T_VT_TH_CATEGORY}</th><th>${T_VT_TH_COUNT}</th></tr></thead>
         <tbody>$(vt_stats_html)</tbody>
-      </table>
+      </table></div>
     </details>" || true)
-    $([ -s "$REPORT_DIR/virustotal.txt" ] && echo "
-    <details $([ "$VT_MALICIOUS" -gt 0 ] && echo 'open')>
-      <summary>🔬 Security vendors' analysis — ${VT_MALICIOUS} / ${VT_TOTAL} engines detected</summary>
-      <div class='vt-engine-grid'>$(vt_engines_html)</div>
-    </details>" || true)
-    <div class="raw-link">📄 <a href="virustotal.txt" target="_blank">${T_VT_RAW}</a></div>
+    ${vt_engines_block}
+    <div class="raw-link">📄 <a href="virustotal.txt" target="_blank" rel="noopener noreferrer">${T_VT_RAW}</a></div>
   </div>
 </div>
 
@@ -1307,13 +1336,13 @@ generate_report() {
     $([ "$SEMGREP_FINDINGS" -gt 0 ] && echo "
     <details open>
       <summary>${SEMGREP_FINDINGS} ${T_SEMGREP_FINDINGS_LABEL}</summary>
-      <table class="tbl-fixed">
-        <colgroup><col class="col-num"><col class="col-sev"><col class="col-rule"><col class="col-loc"><col></colgroup>
-        <thead><tr><th class="num">#</th><th>${T_SEMGREP_TH_SEV}</th><th>${T_SEMGREP_TH_RULE}</th><th>${T_SEMGREP_TH_LOC}</th><th>${T_SEMGREP_TH_MSG}</th></tr></thead>
+      <div class='tbl-wrap'><table class=\"tbl-fixed\">
+        <colgroup><col class=\"col-num\"><col class=\"col-sev\"><col class=\"col-rule\"><col class=\"col-loc\"><col></colgroup>
+        <thead><tr><th class=\"num\">#</th><th>${T_SEMGREP_TH_SEV}</th><th>${T_SEMGREP_TH_RULE}</th><th>${T_SEMGREP_TH_LOC}</th><th>${T_SEMGREP_TH_MSG}</th></tr></thead>
         <tbody>$(semgrep_rows_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
-      </table>
+      </table></div>
     </details>" || true)
-    <div class="raw-link">📄 <a href="semgrep.json" target="_blank">${T_RAW_JSON}</a></div>
+    <div class="raw-link">📄 <a href="semgrep.json" target="_blank" rel="noopener noreferrer">${T_RAW_JSON}</a></div>
   </div>
 </div>
 
@@ -1332,23 +1361,23 @@ generate_report() {
     $([ "$(( TRIVY_CRITICAL + TRIVY_HIGH + TRIVY_MEDIUM + TRIVY_LOW ))" -gt 0 ] && echo "
     <details open>
       <summary>${T_TRIVY_VULN_LABEL} — ${TRIVY_CRITICAL} critical &nbsp;/&nbsp; ${TRIVY_HIGH} high &nbsp;/&nbsp; ${TRIVY_MEDIUM} medium &nbsp;/&nbsp; ${TRIVY_LOW} low</summary>
-      <table class="tbl-fixed">
-        <colgroup><col class="col-sev"><col class="col-cve"><col class="col-pkg"><col class="col-fix"><col></colgroup>
+      <div class='tbl-wrap'><table class=\"tbl-fixed\">
+        <colgroup><col class=\"col-sev\"><col class=\"col-cve\"><col class=\"col-pkg\"><col class=\"col-fix\"><col></colgroup>
         <thead><tr><th>${T_TRIVY_TH_SEV}</th><th>${T_TRIVY_TH_CVE}</th><th>${T_TRIVY_TH_PKG}</th><th>${T_TRIVY_TH_FIX}</th><th>${T_TRIVY_TH_TITLE}</th></tr></thead>
         <tbody>$(trivy_rows_html)</tbody>
-      </table>
+      </table></div>
     </details>" || true)
 
     $([ "$TRIVY_SECRETS" -gt 0 ] && echo "
     <details open>
       <summary>⚠ ${TRIVY_SECRETS} ${T_TRIVY_SECRETS_LABEL}</summary>
-      <table>
+      <div class='tbl-wrap'><table>
         <thead><tr><th>${T_TRIVY_TH_SEV}</th><th>${T_TRIVY_TH_TYPE}</th><th>${T_TRIVY_TH_FILE}</th><th>${T_TRIVY_TH_MATCH}</th></tr></thead>
         <tbody>$(trivy_secrets_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
-      </table>
+      </table></div>
     </details>" || true)
 
-    <div class="raw-link">📄 <a href="trivy_fs.json" target="_blank">${T_RAW_JSON}</a></div>
+    <div class="raw-link">📄 <a href="trivy_fs.json" target="_blank" rel="noopener noreferrer">${T_RAW_JSON}</a></div>
   </div>
 </div>
 
@@ -1363,17 +1392,17 @@ generate_report() {
   <div class="mod-body">
     $([ "$HADOLINT_STATUS" == "skipped_no_docker" ] && echo "<p class=\"msg muted\">${T_HADOLINT_SKIPPED}</p>" || true)
     $([ "$HADOLINT_STATUS" == "pass" ]              && echo "<p class=\"msg ok\">${T_HADOLINT_CLEAN}</p>" || true)
-    $([ "$HADOLINT_FILES" -gt 0 ] && echo "<p class=\"msg muted\" style='font-size:0.8rem'>${HADOLINT_FILES} ${T_HADOLINT_FILES_LABEL} &nbsp;·&nbsp; ${HADOLINT_ERRORS} errors &nbsp;·&nbsp; ${HADOLINT_WARNINGS} warnings</p>" || true)
+    $([ "$HADOLINT_FILES" -gt 0 ] && echo "<p class=\"msg muted\">${HADOLINT_FILES} ${T_HADOLINT_FILES_LABEL} &nbsp;·&nbsp; ${HADOLINT_ERRORS} errors &nbsp;·&nbsp; ${HADOLINT_WARNINGS} warnings$([ "${hadolint_info:-0}" -gt 0 ] && echo " &nbsp;·&nbsp; ${hadolint_info} info")</p>" || true)
     $([ "$HADOLINT_TOTAL" -gt 0 ] && echo "
     <details open>
       <summary>${HADOLINT_TOTAL} ${T_HADOLINT_FINDINGS_LABEL}</summary>
-      <table class='tbl-fixed'>
+      <div class='tbl-wrap'><table class='tbl-fixed'>
         <colgroup><col class='col-num'><col class='col-sev'><col style='width:9%'><col class='col-loc'><col></colgroup>
         <thead><tr><th class='num'>#</th><th>${T_HADOLINT_TH_SEV}</th><th>${T_HADOLINT_TH_RULE}</th><th>${T_HADOLINT_TH_LOC}</th><th>${T_HADOLINT_TH_MSG}</th></tr></thead>
         <tbody>$(hadolint_rows_html "$gh_repo" "$([ -n "$TARGET_REF" ] && echo "$TARGET_REF" || echo "HEAD")")</tbody>
-      </table>
+      </table></div>
     </details>" || true)
-    $([ -s "$REPORT_DIR/hadolint.json" ] && echo "<div class='raw-link'>📄 <a href='hadolint.json' target='_blank'>${T_RAW_JSON}</a></div>" || true)
+    $([ -s "$REPORT_DIR/hadolint.json" ] && echo "<div class='raw-link'>📄 <a href='hadolint.json' target='_blank' rel='noopener noreferrer'>${T_RAW_JSON}</a></div>" || true)
   </div>
 </div>
 
