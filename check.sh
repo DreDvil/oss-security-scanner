@@ -1504,7 +1504,7 @@ main() {
   echo ""
   log_section "FINAL RESULT: $overall"
   echo -e "  VirusTotal  : $(term_badge "$VT_STATUS")  malicious=$VT_MALICIOUS/$VT_TOTAL"
-  echo -e "  Semgrep     : $(term_badge "$SEMGREP_STATUS")  findings=$SEMGREP_FINDINGS"
+  echo -e "  Semgrep     : $(term_badge "$SEMGREP_STATUS")  findings=$SEMGREP_FINDINGS  errors=$SEMGREP_ERRORS"
   echo -e "  Trivy       : $(term_badge "$TRIVY_STATUS")  critical=$TRIVY_CRITICAL  high=$TRIVY_HIGH  secrets=$TRIVY_SECRETS"
   echo -e "  Hadolint    : $(term_badge "$HADOLINT_STATUS")  files=$HADOLINT_FILES  errors=$HADOLINT_ERRORS  warnings=$HADOLINT_WARNINGS"
   echo ""
