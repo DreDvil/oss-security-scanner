@@ -478,7 +478,12 @@ run_virustotal() {
     "$VT_IMAGE_LOCAL" \
     file "$sha256" 2>&1 || true)
 
-  if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404'; then
+  # Check success first: a valid vt-cli response always contains last_analysis_stats.
+  # Only then check error codes to avoid false positives from engine detection names
+  # (e.g. "Trojan.Invalid.PE", "W32.Forbidden.Agent") matching broad grep patterns.
+  if echo "$vt_out" | grep -q 'last_analysis_stats:'; then
+    log_ok "Found in VirusTotal cache"
+  elif echo "$vt_out" | grep -qE 'NotFoundError|ItemNotFoundError'; then
     # Not in VT database — upload and wait for results
     log_info "Not in VT database — uploading and scanning (--wait)…"
     local vt_upload_timeout=300
@@ -499,20 +504,19 @@ run_virustotal() {
       -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
       file "$sha256" 2>&1 || true)
-    # Re-validate post-upload fetch — same checks as initial fetch
-    if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404|API key|apikey|invalid|forbidden|401|403'; then
-      log_error "VirusTotal post-upload fetch failed: $(echo "$vt_out" | head -1)"
+    # Post-upload: success requires last_analysis_stats in response
+    if ! echo "$vt_out" | grep -q 'last_analysis_stats:'; then
+      log_error "VirusTotal post-upload fetch returned no results: $(echo "$vt_out" | head -1)"
       rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
       VT_STATUS="error"
       return
     fi
-  elif echo "$vt_out" | grep -qiE 'API key|apikey|invalid|forbidden|401|403'; then
-    log_error "VirusTotal API key error: $(echo "$vt_out" | head -1)"
+  else
+    # No last_analysis_stats and no NotFoundError — genuine API/auth error
+    log_error "VirusTotal API error: $(echo "$vt_out" | head -2 | tr '\n' ' ')"
     rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
     VT_STATUS="error"
     return
-  else
-    log_ok "Found in VirusTotal cache"
   fi
 
   # Remove temp config dir (key no longer needed)
@@ -1145,7 +1149,7 @@ generate_report() {
   code{color:var(--code);font-size:var(--fs-sm);font-family:"SF Mono",Menlo,monospace}
 
   /* ── Row number column ── */
-  .num{width:38px;text-align:center !important;color:var(--muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums}
+  .num{width:38px;text-align:center !important;color:var(--muted);font-size:var(--fs-sm);font-variant-numeric:tabular-nums;white-space:nowrap}
 
   /* ── Rule ID (grey, not a link) ── */
   .rule-id{color:var(--muted)}
