@@ -216,8 +216,8 @@ _semgrep_configs() {
   fi
 
   # ── Kubernetes manifests ──
-  if find "$src" -maxdepth 5 \( -name "*.yaml" -o -name "*.yml" \) 2>/dev/null \
-       | xargs grep -l "^apiVersion:" 2>/dev/null | grep -q .; then
+  if find "$src" -maxdepth 5 \( -name "*.yaml" -o -name "*.yml" \) \
+       -exec grep -lq "^apiVersion:" {} + 2>/dev/null; then
     cfg="$cfg p/kubernetes"
     log_info "  → detected: Kubernetes" >&2
   fi
