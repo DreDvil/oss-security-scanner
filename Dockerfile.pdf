@@ -6,7 +6,10 @@ RUN apt-get update -qq \
          libglib2.0-0 libgdk-pixbuf-2.0-0 \
          libxml2 libxslt1.1 zlib1g \
          fonts-liberation fonts-noto fonts-noto-cjk \
-    && pip install --no-cache-dir weasyprint \
-    && rm -rf /var/lib/apt/lists/*
+    && pip install --no-cache-dir "weasyprint==65.1" \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 1001 -g root wpuser
+
+USER wpuser
 
 ENTRYPOINT ["python", "-m", "weasyprint"]
