@@ -588,7 +588,7 @@ semgrep_rows_html() {
       <td class=\"num\">\($i + 1)</td>
       <td class=\"sev-\(.extra.severity | sev_css)\">\(.extra.severity | sev_label)</td>
       <td><code class=\"rule-id\">\(.check_id)</code></td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/"))#L\(.start.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.path | ltrimstr("/src/")):\(.start.line)</a></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.path | ltrimstr("/src/") | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | gsub("\"";"&quot;"))#L\(.start.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.path | ltrimstr("/src/") | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;")):\(.start.line)</a></td>
       <td class=\"desc-cell\">\(.extra.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/semgrep.json" 2>/dev/null || true
 }
@@ -613,9 +613,9 @@ trivy_secrets_html() {
     .Results[]? | . as $r | .Secrets[]? |
     "<tr>
       <td class=\"sev-\(.Severity | ascii_downcase)\">\(.Severity)</td>
-      <td>\(.Title | gsub("<";"&lt;"))</td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\($r.Target)</a></td>
-      <td class=\"desc-cell\"><code>\(.Match | gsub("<";"&lt;") | .[0:120])</code></td>
+      <td>\(.Title | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\($r.Target | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | gsub("\"";"&quot;"))\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\($r.Target | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;"))</a></td>
+      <td class=\"desc-cell\"><code>\(.Match | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | .[0:120])</code></td>
     </tr>"' "$REPORT_DIR/trivy_fs.json" 2>/dev/null || true
 }
 
@@ -692,7 +692,7 @@ hadolint_rows_html() {
       <td class=\"num\">\($i + 1)</td>
       <td class=\"sev-\(if .level=="error" then "error" elif .level=="warning" then "warning" else "info" end)\">\(.level | ascii_upcase)</td>
       <td><code class=\"rule-id\">\(.code)</code></td>
-      <td class=\"loc-cell\"><a href=\"\($base)/\(.file | ltrimstr("/src/"))#L\(.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.file | ltrimstr("/src/")):\(.line)</a></td>
+      <td class=\"loc-cell\"><a href=\"\($base)/\(.file | ltrimstr("/src/") | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | gsub("\"";"&quot;"))#L\(.line)\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"loc-link\">\(.file | ltrimstr("/src/") | gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;")):\(.line)</a></td>
       <td class=\"desc-cell\">\(.message | gsub("<";"&lt;") | gsub(">";"&gt;"))</td>
     </tr>"' "$REPORT_DIR/hadolint.json" 2>/dev/null | head -200 || true
 }
