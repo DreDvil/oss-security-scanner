@@ -483,7 +483,7 @@ run_virustotal() {
   # (e.g. "Trojan.Invalid.PE", "W32.Forbidden.Agent") matching broad grep patterns.
   if echo "$vt_out" | grep -q 'last_analysis_stats:'; then
     log_ok "Found in VirusTotal cache"
-  elif echo "$vt_out" | grep -qE 'NotFoundError|ItemNotFoundError'; then
+  elif echo "$vt_out" | grep -qiE 'NotFoundError|ItemNotFoundError|not found|404'; then
     # Not in VT database — upload and wait for results
     log_info "Not in VT database — uploading and scanning (--wait)…"
     local vt_upload_timeout=300
