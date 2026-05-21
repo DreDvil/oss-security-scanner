@@ -341,7 +341,8 @@ run_trivy() {
   local trivy_timeout=600  # 10 min
 
   log_info "Running Trivy (timeout ${trivy_timeout}s)…"
-  if ! timeout "$trivy_timeout" docker run --rm \
+  local ec=0
+  timeout "$trivy_timeout" docker run --rm \
     -v "$WORK_DIR/source:/target:ro" \
     -v "$REPORT_DIR:/reports" \
     "$TRIVY_IMAGE" \
@@ -350,8 +351,8 @@ run_trivy() {
       --output /reports/trivy_fs.json \
       --scanners vuln,secret,misconfig \
       --quiet \
-      /target 2>/dev/null; then
-    local ec=$?
+      /target 2>/dev/null || ec=$?
+  if [[ $ec -ne 0 ]]; then
     if [[ $ec -eq 124 ]]; then
       log_warn "Trivy timed out after ${trivy_timeout}s"
     else
@@ -416,6 +417,11 @@ ensure_vt_image() {
   log_info "Building vt-cli image (first run, ~1–2 min)…"
   docker build -t "$VT_IMAGE_LOCAL" -f "$dockerfile" "$(dirname "$0")" \
     2>&1 | grep -E 'Step|error|Error|=>|DONE' || true
+  if ! docker image inspect "$VT_IMAGE_LOCAL" &>/dev/null; then
+    log_error "vt-cli image build failed — VT scan skipped"
+    VT_STATUS="error"
+    return 1
+  fi
   log_ok "vt-cli image built: $VT_IMAGE_LOCAL"
 }
 
@@ -474,16 +480,31 @@ run_virustotal() {
   if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404'; then
     # Not in VT database — upload and wait for results
     log_info "Not in VT database — uploading and scanning (--wait)…"
-    docker run --rm \
+    local vt_upload_timeout=300
+    local vt_upload_ec=0
+    timeout "$vt_upload_timeout" docker run --rm \
       -v "$WORK_DIR:/work:ro" \
       -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
-      scan file --wait /work/source.tar.gz >/dev/null 2>&1 || true
+      scan file --wait /work/source.tar.gz >/dev/null 2>&1 || vt_upload_ec=$?
+    if [[ $vt_upload_ec -ne 0 ]]; then
+      log_warn "VT upload/wait failed (ec=$vt_upload_ec) — skipping VT"
+      rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
+      VT_STATUS="error"
+      return
+    fi
     log_info "Upload complete — fetching analysis results…"
     vt_out=$(docker run --rm \
       -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
       file "$sha256" 2>&1 || true)
+    # Re-validate post-upload fetch — same checks as initial fetch
+    if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404|API key|apikey|invalid|forbidden|401|403'; then
+      log_error "VirusTotal post-upload fetch failed: $(echo "$vt_out" | head -1)"
+      rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
+      VT_STATUS="error"
+      return
+    fi
   elif echo "$vt_out" | grep -qiE 'API key|apikey|invalid|forbidden|401|403'; then
     log_error "VirusTotal API key error: $(echo "$vt_out" | head -1)"
     rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
