@@ -33,6 +33,7 @@ LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
 PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
 
 REPORT_GENERATED=false
+GENERATE_PDF=false
 
 # Result variables (set by each scanner)
 SEMGREP_STATUS="skipped";   SEMGREP_FINDINGS=0;  SEMGREP_ERRORS=0
@@ -477,7 +478,7 @@ run_virustotal() {
       -v "$WORK_DIR:/work:ro" \
       -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
-      scan file --wait /work/source.tar.gz 2>&1 || true
+      scan file --wait /work/source.tar.gz >/dev/null 2>&1 || true
     log_info "Upload complete — fetching analysis results…"
     vt_out=$(docker run --rm \
       -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
@@ -1413,7 +1414,8 @@ main() {
   fi
 
   # 2. Parse CLI flags (highest precedence — override .env)
-  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true GENERATE_PDF=false
+  GENERATE_PDF=false
+  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)
