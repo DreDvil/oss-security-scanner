@@ -10,8 +10,8 @@ Generates a self-contained **HTML report** (and optional **PDF**) with a color-c
 
 | Scanner | What it checks |
 |---|---|
-| 🦠 **VirusTotal** | Malware detection across 70+ AV engines (via vt-cli) |
-| 🔎 **Semgrep** | Static code analysis — security patterns, bad practices |
+| 🦠 **VirusTotal** | Malware detection across 70+ AV engines (via vt-cli); cache-first with automatic upload and 5-minute analysis timeout |
+| 🔎 **Semgrep** | Static code analysis — security patterns, bad practices; errors surfaced in terminal summary |
 | 🛡️ **Trivy** | CVE vulnerabilities in dependencies, secrets in source code, misconfigs |
 | 🐳 **Hadolint** | Dockerfile best-practices and security linting |
 
@@ -106,7 +106,7 @@ check.sh https://github.com/owner/repo
     ├─ 🦠 VirusTotal
     │     └─ tar + sha256 → vt-cli (Docker, built from Dockerfile.vt)
     │         ├─ Cache hit  → fetch existing analysis
-    │         └─ Cache miss → upload file, wait for results
+    │         └─ Cache miss → upload file, wait for results (5 min timeout)
     │         └─ Report: file metadata + per-engine malicious detections
     │
     ├─ 🔎 Semgrep
@@ -163,7 +163,9 @@ xdg-open reports/*/report.html      # Linux
 - **Semgrep table**: numbered rows, severity mapped to HIGH/MEDIUM/LOW/INFO, clickable GitHub links to exact lines
 - **Trivy secrets**: file links pointing directly to the affected file in the repo
 - **Hadolint**: lists all Dockerfile issues with rule codes, severity, and line numbers
-- **Responsive layout** — adapts to any screen width
+- **Responsive layout** — adapts to any screen width; finding tables scroll horizontally on mobile
+- **Accessibility** — keyboard focus indicators on all interactive elements; external links include `rel="noopener noreferrer"`
+- **XSS-safe** — all scanner output (file paths, rule IDs, detection names) is HTML-entity-encoded before rendering
 
 ---
 
@@ -171,8 +173,8 @@ xdg-open reports/*/report.html      # Linux
 
 | Image | Dockerfile | Purpose |
 |---|---|---|
-| `vt-cli:local` | `Dockerfile.vt` | VirusTotal CLI (Go binary) |
-| `weasyprint-pdf:local` | `Dockerfile.pdf` | HTML → PDF export (with Noto fonts) |
+| `vt-cli:local` | `Dockerfile.vt` | VirusTotal CLI (Go binary); base images digest-pinned for supply-chain safety |
+| `weasyprint-pdf:local` | `Dockerfile.pdf` | HTML → PDF export (WeasyPrint 65.1, Noto fonts, runs as non-root) |
 
 All images are built automatically on first use (~1–3 min each) and cached by Docker for subsequent runs. `hadolint/hadolint` and `semgrep/semgrep` are pulled from Docker Hub.
 
@@ -181,6 +183,7 @@ All images are built automatically on first use (~1–3 min each) and cached by 
 ## Notes
 
 - **VirusTotal free tier**: 4 requests/min, 500 req/day. Large repos (>650 MB archive) are skipped automatically.
+- **VirusTotal upload**: repos not found in VT's cache are uploaded automatically and analysed. Upload + analysis has a 5-minute ceiling; if VT is slow, the scan is skipped with an `error` badge (not a false pass).
 - **VirusTotal freshness**: each run downloads a fresh archive from GitHub. If the SHA256 differs from a previous upload, VT treats it as a new file and starts a fresh scan — some engines may time out on the first run. Results stabilise if the same file is re-checked.
 - **Semgrep**: uses a 3-level fallback (auto → language-specific rulesets → bundled p/default) to maximise rule coverage regardless of network availability.
 - **Hadolint**: automatically finds all `Dockerfile*` files in the repository. Skipped (SKIP badge) if none are found.
