@@ -917,6 +917,10 @@ ensure_pdf_image() {
   log_info "Building WeasyPrint image (first run, ~2–3 min)…"
   docker build -t "$PDF_IMAGE_LOCAL" -f "$dockerfile" "$(dirname "$0")" \
     2>&1 | grep -E 'Step|error|Error|=>|DONE' || true
+  if ! docker image inspect "$PDF_IMAGE_LOCAL" &>/dev/null; then
+    log_warn "WeasyPrint image build failed — see output above"
+    return 1
+  fi
   log_ok "WeasyPrint image built: $PDF_IMAGE_LOCAL"
 }
 
