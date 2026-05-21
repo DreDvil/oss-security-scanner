@@ -27,9 +27,12 @@ TARGET=""
 TARGET_REF=""    # specific tag/branch to scan (empty = default branch HEAD)
 WORK_DIR=""
 REPORT_DIR=""
+VT_CFG_DIR=""
 VT_API_KEY="${VT_API_KEY:-}"
 LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
 PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
+
+REPORT_GENERATED=false
 
 # Result variables (set by each scanner)
 SEMGREP_STATUS="skipped";   SEMGREP_FINDINGS=0;  SEMGREP_ERRORS=0
@@ -96,7 +99,8 @@ setup_workdir() {
 }
 
 cleanup() {
-  [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
+  [[ -n "$WORK_DIR"   && -d "$WORK_DIR"   ]] && rm -rf "$WORK_DIR"
+  [[ -n "$VT_CFG_DIR" && -d "$VT_CFG_DIR" ]] && rm -rf "$VT_CFG_DIR"
 }
 
 # ── Parse GitHub URL → owner/repo ─────────────────────────────────────────────
@@ -111,27 +115,22 @@ parse_github_url() {
 # ── Clone repository ──────────────────────────────────────────────────────────
 clone_repo() {
   local clone_timeout=300
+  local ec=0
   if [[ -n "$TARGET_REF" ]]; then
     log_info "Cloning $TARGET @ ${TARGET_REF} (timeout ${clone_timeout}s)…"
-    if ! timeout "$clone_timeout" git clone --depth 1 --branch "$TARGET_REF" --quiet "$TARGET" "$WORK_DIR/source" 2>&1; then
-      local ec=$?
-      if [[ $ec -eq 124 ]]; then
-        log_error "git clone timed out after ${clone_timeout}s"
-      else
-        log_error "Failed to clone repository at ref '${TARGET_REF}' — check tag/branch name"
-      fi
+    timeout "$clone_timeout" git clone --depth 1 --branch "$TARGET_REF" --quiet "$TARGET" "$WORK_DIR/source" 2>&1 || ec=$?
+    if [[ $ec -ne 0 ]]; then
+      [[ $ec -eq 124 ]] && log_error "git clone timed out after ${clone_timeout}s" \
+                        || log_error "Failed to clone repository at ref '${TARGET_REF}' — check tag/branch name"
       exit 1
     fi
     log_ok "Cloned tag/branch: ${TARGET_REF}"
   else
     log_info "Cloning $TARGET (default branch, timeout ${clone_timeout}s)…"
-    if ! timeout "$clone_timeout" git clone --depth 1 --quiet "$TARGET" "$WORK_DIR/source" 2>&1; then
-      local ec=$?
-      if [[ $ec -eq 124 ]]; then
-        log_error "git clone timed out after ${clone_timeout}s"
-      else
-        log_error "Failed to clone repository"
-      fi
+    timeout "$clone_timeout" git clone --depth 1 --quiet "$TARGET" "$WORK_DIR/source" 2>&1 || ec=$?
+    if [[ $ec -ne 0 ]]; then
+      [[ $ec -eq 124 ]] && log_error "git clone timed out after ${clone_timeout}s" \
+                        || log_error "Failed to clone repository"
       exit 1
     fi
     log_ok "Cloned HEAD of default branch"
@@ -297,7 +296,7 @@ run_semgrep() {
 
     if [[ -s "$l3_out" ]] && jq -e '.results' "$l3_out" &>/dev/null; then
       if [[ -s "$out" ]] && jq -e '.results' "$out" &>/dev/null; then
-        jq -s '{ results: (.[0].results + .[1].results | unique_by(.check_id + .path + (.start.line | tostring))), errors: (.[0].errors + .[1].errors) }' \
+        jq -s '{ results: (.[0].results + .[1].results | unique_by([.check_id, .path, .start.line])), errors: (.[0].errors + .[1].errors) }' \
           "$out" "$l3_out" > "$out.merged" && mv "$out.merged" "$out"
       else
         mv "$l3_out" "$out"
@@ -460,29 +459,33 @@ run_virustotal() {
   log_info "SHA256: $sha256"
 
   # SEC-3: write API key to a temp config file so it never appears in `ps aux`
-  local vt_cfg_dir vt_out
-  vt_cfg_dir=$(mktemp -d /tmp/vt_cfg_XXXXXX)
-  chmod 700 "$vt_cfg_dir"
-  printf 'apikey = "%s"\n' "$VT_API_KEY" > "$vt_cfg_dir/vt.toml"
-  chmod 600 "$vt_cfg_dir/vt.toml"
+  local vt_out
+  VT_CFG_DIR=$(mktemp -d /tmp/vt_cfg_XXXXXX)
+  chmod 700 "$VT_CFG_DIR"
+  printf 'apikey = "%s"\n' "$VT_API_KEY" > "$VT_CFG_DIR/vt.toml"
+  chmod 600 "$VT_CFG_DIR/vt.toml"
 
   vt_out=$(docker run --rm \
-    -v "$vt_cfg_dir/vt.toml:/root/.vt.toml:ro" \
+    -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
     "$VT_IMAGE_LOCAL" \
     file "$sha256" 2>&1 || true)
 
   if echo "$vt_out" | grep -qiE 'NotFoundError|not found|404'; then
     # Not in VT database — upload and wait for results
     log_info "Not in VT database — uploading and scanning (--wait)…"
-    vt_out=$(docker run --rm \
+    docker run --rm \
       -v "$WORK_DIR:/work:ro" \
-      -v "$vt_cfg_dir/vt.toml:/root/.vt.toml:ro" \
+      -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
       "$VT_IMAGE_LOCAL" \
-      scan file --wait /work/source.tar.gz 2>&1 || true)
-    log_info "Analysis complete"
+      scan file --wait /work/source.tar.gz 2>&1 || true
+    log_info "Upload complete — fetching analysis results…"
+    vt_out=$(docker run --rm \
+      -v "$VT_CFG_DIR/vt.toml:/root/.vt.toml:ro" \
+      "$VT_IMAGE_LOCAL" \
+      file "$sha256" 2>&1 || true)
   elif echo "$vt_out" | grep -qiE 'API key|apikey|invalid|forbidden|401|403'; then
     log_error "VirusTotal API key error: $(echo "$vt_out" | head -1)"
-    rm -rf "$vt_cfg_dir"
+    rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
     VT_STATUS="error"
     return
   else
@@ -490,7 +493,7 @@ run_virustotal() {
   fi
 
   # Remove temp config dir (key no longer needed)
-  rm -rf "$vt_cfg_dir"
+  rm -rf "$VT_CFG_DIR"; VT_CFG_DIR=""
 
   # Save raw output (includes full vt-cli YAML-like response)
   echo "$vt_out" > "$REPORT_DIR/virustotal.txt"
@@ -616,16 +619,15 @@ run_hadolint() {
   log_info "Found $HADOLINT_FILES Dockerfile(s)"
 
   # Build /src-relative path list for the Docker container
-  local src_paths=""
+  local src_paths=()
   while IFS= read -r df; do
-    src_paths="$src_paths /src${df#$WORK_DIR/source}"
+    src_paths+=("/src${df#$WORK_DIR/source}")
   done <<< "$df_list"
 
-  # shellcheck disable=SC2086
   docker run --rm \
     -v "$WORK_DIR/source:/src:ro" \
     "$HADOLINT_IMAGE" \
-    hadolint --format json $src_paths > "$out" 2>/dev/null || true
+    hadolint --format json "${src_paths[@]}" > "$out" 2>/dev/null || true
 
   # hadolint exits 1 on findings; ensure valid JSON
   if [[ ! -s "$out" ]] || ! jq -e '.' "$out" &>/dev/null 2>&1; then
@@ -646,7 +648,7 @@ run_hadolint() {
 
   if [[ "$HADOLINT_ERRORS" -gt 0 ]]; then
     log_warn "$HADOLINT_ERRORS Dockerfile error(s) detected"
-    HADOLINT_STATUS="warn"
+    HADOLINT_STATUS="fail"
   elif [[ "$HADOLINT_WARNINGS" -gt 0 ]]; then
     log_warn "$HADOLINT_WARNINGS Dockerfile warning(s)"
     HADOLINT_STATUS="warn"
@@ -683,6 +685,8 @@ vt_meta_html() {
   size=$(           awk '/^[[:space:]]+size:/{print $2+0; exit}' "$f")
   type_desc=$(      awk '/^[[:space:]]+type_description:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
   meaningful_name=$(awk '/^[[:space:]]+meaningful_name:/{$1=""; sub(/^[[:space:]]+/,""); print; exit}' "$f")
+  type_desc=$(echo "$type_desc" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+  meaningful_name=$(echo "$meaningful_name" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
   rep=$(            awk '/^[[:space:]]+reputation:/{print $2; exit}' "$f")
   times_sub=$(      awk '/^[[:space:]]+times_submitted:/{print $2; exit}' "$f")
   unique_src=$(     awk '/^[[:space:]]+unique_sources:/{print $2; exit}' "$f")
@@ -755,6 +759,8 @@ vt_engines_html() {
       if (eng!="" && (cat=="malicious" || cat=="suspicious")) {
         verdict = (cat=="malicious") ? (res==""?"Malicious":res) : (res==""?"Suspicious":res)
         cls     = (cat=="malicious") ? "malicious" : "suspicious"
+        gsub(/&/, "\\&amp;", eng);     gsub(/</, "\\&lt;", eng);     gsub(/>/, "\\&gt;", eng)
+        gsub(/&/, "\\&amp;", verdict); gsub(/</, "\\&lt;", verdict); gsub(/>/, "\\&gt;", verdict)
         print "<div class=\"vt-eng\" data-cat=\""cat"\"><span class=\"vt-eng-name\">"eng"</span><span class=\"vt-eng-verdict vt-v-"cls"\">"verdict"</span></div>"
       }
       cat=""; res=""
@@ -929,6 +935,8 @@ generate_pdf() {
 }
 
 generate_report() {
+  [[ "$REPORT_GENERATED" == true ]] && return
+  REPORT_GENERATED=true
   local overall
   overall=$(overall_status)
   local gh_repo
@@ -1409,6 +1417,7 @@ main() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)
+        [[ $# -lt 2 ]] && { log_error "--release requires a value"; exit 1; }
         if ! [[ "$2" =~ ^[A-Za-z0-9._/-]+$ ]]; then
           log_error "Invalid --release value: '$2' (allowed: a-z A-Z 0-9 . _ / -)"
           exit 1
@@ -1419,8 +1428,12 @@ main() {
       --no-vt)        RUN_VT=false ;;
       --no-hadolint)  RUN_HADOLINT=false ;;
       --pdf)          GENERATE_PDF=true ;;
-      --vt-key)       VT_API_KEY="$2"; shift ;;
-      --lang)         LANG_REPORT="$2"; shift ;;
+      --vt-key)
+        [[ $# -lt 2 ]] && { log_error "--vt-key requires a value"; exit 1; }
+        VT_API_KEY="$2"; shift ;;
+      --lang)
+        [[ $# -lt 2 ]] && { log_error "--lang requires a value"; exit 1; }
+        LANG_REPORT="$2"; shift ;;
       *) log_warn "Unknown option: $1" ;;
     esac
     shift

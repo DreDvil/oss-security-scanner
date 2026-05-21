@@ -6,9 +6,9 @@
 
 FROM golang:1.22-alpine AS builder
 RUN apk add --no-cache git
-RUN go install github.com/VirusTotal/vt-cli/vt@latest
+RUN go install github.com/VirusTotal/vt-cli/vt@v1.0.1
 
-FROM alpine:latest
+FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /go/bin/vt /usr/local/bin/vt
 ENTRYPOINT ["vt"]
