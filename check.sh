@@ -33,6 +33,7 @@ LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
 PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
 
 REPORT_GENERATED=false
+PDF_GENERATED=false
 GENERATE_PDF=false
 
 # Result variables (set by each scanner)
@@ -946,6 +947,8 @@ ensure_pdf_image() {
 }
 
 generate_pdf() {
+  [[ "$PDF_GENERATED" == true ]] && return
+  PDF_GENERATED=true
   local pdf_file="$REPORT_DIR/report.pdf"
   log_info "Generating PDF report…"
   ensure_pdf_image || return
