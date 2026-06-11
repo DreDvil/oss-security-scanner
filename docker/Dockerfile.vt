@@ -1,7 +1,7 @@
 # Builds the official VirusTotal CLI (https://github.com/VirusTotal/vt-cli)
 # Multi-stage: compile in Go → copy binary to minimal Alpine image
 #
-# Build:  docker build -t vt-cli:local -f Dockerfile.vt .
+# Build:  docker build -t vt-cli:local -f docker/Dockerfile.vt .
 # Use:    docker run --rm -e VT_API_KEY=xxx vt-cli:local file <sha256>
 #
 # To update digests, run:

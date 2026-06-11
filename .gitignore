@@ -15,3 +15,7 @@ reports/
 
 # Docker build cache
 *.dockerfile.bak
+
+# Local-only — not part of the published project
+tests/
+.planning/
