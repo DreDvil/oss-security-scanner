@@ -16,6 +16,8 @@ reports/
 # Docker build cache
 *.dockerfile.bak
 
-# Local-only — not part of the published project
-tests/
-.planning/
+# Local-only — not part of the published project.
+# NOTE: .planning/ is intentionally NOT ignored — it is the GSD working
+# directory and must stay committable on this (local) branch. The published
+# repo is kept code-only by the release process (a selective export to a clean
+# branch), not by this ignore list.

@@ -1,6 +1,6 @@
 # 🔍 OSS Security Scanner
 
-Automated security scanner for open source GitHub repositories. Runs independent checks — **VirusTotal**, **Semgrep**, **Trivy + Grype** (deduplicated CVE scanning), and **Hadolint** — entirely via Docker. No local installations required beyond Docker, Git, curl, and jq.
+Automated security scanner for open source GitHub repositories. Runs independent checks — **VirusTotal**, **Semgrep**, **Trivy + Grype** (deduplicated CVE scanning), and **Hadolint** — entirely via Docker, and generates a **Syft SBOM** that feeds Grype for wider package coverage. No local installations required beyond Docker, Git, curl, and jq.
 
 Generates a self-contained, interactive **HTML report** (`report.html`) plus machine-readable **`report.json`**, with a color-coded verdict (PASS / WARN / FAIL) per scanner and an overall risk score.
 
@@ -13,16 +13,18 @@ Generates a self-contained, interactive **HTML report** (`report.html`) plus mac
 | 🦠 **VirusTotal** | Malware detection across 70+ AV engines (via vt-cli); cache-first with automatic upload and 5-minute analysis timeout |
 | 🔎 **Semgrep** | Static code analysis — security patterns, bad practices; errors surfaced in terminal summary |
 | 🛡️ **Trivy** | CVE vulnerabilities in dependencies, secrets in source code, misconfigs |
-| 📦 **Grype** | Second CVE engine — cross-checks dependencies against a different advisory database for broader coverage |
+| 📦 **Grype** | Second CVE engine — scans the Syft SBOM (falls back to directory mode) and cross-checks dependencies against a different advisory database for broader coverage |
+| 🧾 **Syft** | Generates a software bill of materials (SBOM, `syft-json`) of the repo's packages — an auditable catalog that is fed to Grype and downloadable from the report |
 | 🐳 **Hadolint** | Dockerfile best-practices and security linting |
 
 - Scan any public GitHub repository by URL
 - Pin to a specific release tag or branch with `--release`
 - **Trivy + Grype dual CVE scanning** — findings are deduplicated on a canonical key and each row is labelled with its source (`Trivy`, `Grype`, or `Trivy + Grype` when both engines agree); GHSA ids from Grype are aliased to their CVE so the two engines reconcile
+- **SBOM generation (Syft)** — every scan produces a `syft-json` SBOM (`raw/sbom.syft.json`), downloadable from the report and fed to Grype to widen package coverage; `--no-sbom` reverts Grype to directory mode
 - **Overall risk score** plus per-scanner PASS / WARN / FAIL verdicts
 - **Diff mode** (`--compare DIR`) — compare against a prior report and surface what changed
 - **Per-repo config & cache** — repeat scans are served from cache; `--force` runs fresh
-- Skip individual scanners: `--no-vt`, `--no-semgrep`, `--no-trivy`, `--no-grype`, `--no-hadolint`
+- Skip individual scanners: `--no-vt`, `--no-semgrep`, `--no-trivy`, `--no-grype`, `--no-hadolint`; skip SBOM generation with `--no-sbom`
 - **Interactive HTML report** with light/dark theme toggle and a fluid layout that fills any screen width (375px – 2560px)
 - Report language: **English** and **Russian** (`--lang ru`)
 - **VirusTotal detail view** — file metadata (SHA256/MD5/SHA1, size, type) + per-engine malicious detections
@@ -63,7 +65,6 @@ lib/
   scanner.grype-normalize.jq      # Grype → common schema (GHSA→CVE aliasing)
 docker/
   Dockerfile.vt                   # vt-cli:local image (VirusTotal CLI)
-  Dockerfile.pdf                  # weasyprint-pdf:local image (PDF export — see Notes)
 ```
 
 ---
@@ -109,9 +110,9 @@ VT_API_KEY=xxx ./check.sh https://github.com/sigstore/cosign --release v2.2.4
 | `--no-semgrep` | Skip Semgrep scan |
 | `--no-trivy` | Skip Trivy scan |
 | `--no-grype` | Skip Grype scan |
+| `--no-sbom` | Skip Syft SBOM generation; Grype scans in directory mode |
 | `--no-hadolint` | Skip Hadolint Dockerfile scan |
 | `--vt-key KEY` | VirusTotal API key (overrides `.env`) |
-| `--pdf` | _Temporarily unavailable_ — PDF export is being reworked for the interactive report (see Notes) |
 
 ### Environment variables
 
@@ -141,9 +142,10 @@ check.sh https://github.com/owner/repo
     │         ├─ Level 2: language-specific rulesets (js, py, go, java …)
     │         └─ Level 3: bundled p/default (always runs as fallback)
     │
-    ├─ 🛡️ Trivy + 📦 Grype
+    ├─ 🛡️ Trivy + 🧾 Syft + 📦 Grype
     │     ├─ docker run aquasec/trivy fs --scanners vuln,secret,misconfig
-    │     ├─ docker run anchore/grype dir:. (second CVE engine)
+    │     ├─ docker run anchore/syft dir:. -o syft-json → raw/sbom.syft.json
+    │     ├─ docker run anchore/grype sbom:raw/sbom.syft.json (dir:. if --no-sbom / SBOM fails)
     │     └─ merge → dedup on canonical key (id+pkg+version), GHSA→CVE aliased,
     │                 each finding labelled Trivy / Grype / Trivy + Grype
     │
@@ -165,6 +167,22 @@ check.sh https://github.com/owner/repo
 
 ---
 
+## Running the tests
+
+The repository ships two offline regression suites that cover the Trivy + Grype
+merge/dedup logic and the Grype diagnostics layer. They run entirely **offline**
+(no Docker, no network) and require only `jq` and `bash`:
+
+```bash
+bash tests/merge_vulns.test.sh   # Trivy + Grype merge / dedup (canonical-key grouping)
+bash tests/grype_diag.test.sh    # Grype package counts, DB-age, inconclusive triggers
+```
+
+Each suite prints a per-assertion `PASS`/`FAIL` line and a final tally, exiting
+non-zero if any assertion fails.
+
+---
+
 ## Report structure
 
 ```
@@ -174,6 +192,7 @@ reports/
     ├── report.json       ← machine-readable data (jq-queryable)
     ├── raw/              ← scanner data artifacts (linked from report)
     │   ├── semgrep.json, trivy_fs.json, grype.json, hadolint.json
+    │   ├── sbom.syft.json (Syft SBOM; absent with --no-sbom)
     │   ├── vulns_merged.json, virustotal.txt, …
     └── logs/             ← run diagnostics (internal; not linked)
         ├── semgrep.log (scanner stderr), semgrep-run.log, trivy-run.log, …
@@ -191,7 +210,7 @@ xdg-open reports/*/report.html      # Linux
 ## Report highlights
 
 - **Light & dark themes** — toggle in the header, preference persisted across runs; module cards per scanner
-- **Dependencies table** (Trivy + Grype): one deduplicated CVE list with a `Source` column (`Trivy` / `Grype` / `Trivy + Grype`), severity, CVSS, fixed-in version, and a diagnostics line when Grype is inconclusive
+- **Dependencies table** (Trivy + Grype): one deduplicated CVE list with a `Source` column (`Trivy` / `Grype` / `Trivy + Grype`), severity, CVSS, fixed-in version, and a diagnostics line when Grype is inconclusive; the **Syft SBOM** (`raw/sbom.syft.json`) is offered as a download alongside the raw scanner artifacts
 - **VirusTotal block**: file hashes (SHA256/MD5/SHA1), size, type, reputation, scan dates + per-engine malicious verdict table
 - **Semgrep table**: numbered rows, severity mapped to HIGH/MEDIUM/LOW/INFO, clickable GitHub links to exact lines
 - **Trivy secrets**: file links pointing directly to the affected file in the repo
@@ -207,7 +226,6 @@ xdg-open reports/*/report.html      # Linux
 | Image | Dockerfile | Purpose |
 |---|---|---|
 | `vt-cli:local` | `docker/Dockerfile.vt` | VirusTotal CLI (Go binary); base images digest-pinned for supply-chain safety |
-| `weasyprint-pdf:local` | `docker/Dockerfile.pdf` | HTML → PDF export (WeasyPrint 65.1, Noto fonts, runs as non-root) |
 
 All images are built automatically on first use (~1–3 min each) and cached by Docker for subsequent runs. `hadolint/hadolint` and `semgrep/semgrep` are pulled from Docker Hub.
 
@@ -223,10 +241,10 @@ All images are built automatically on first use (~1–3 min each) and cached by 
 - **Trivy + Grype**: both fetch their vulnerability databases on each run. They use different advisory sources, so coverage differs per ecosystem (e.g. Trivy parses `bun.lock`, which Grype does not yet). The report dedups overlapping findings and labels each row by source.
 - **Grype "inconclusive"**: in directory mode Grype only sees dependencies it can pin from committed lockfiles/manifests. A repo with no resolvable manifests yields 0 Grype findings — the report flags this as inconclusive rather than a clean pass.
 - All scanners run independently — a failure in one does not stop others.
-- **PDF export is temporarily unavailable.** The interactive HTML report relies on JavaScript, which WeasyPrint cannot execute, so `--pdf` currently prints a notice instead of a file. For a PDF today, open `report.html` in a browser and use Print → Save as PDF (the report ships a print stylesheet for this). A native PDF export is planned for a future release.
+- **Saving a PDF**: open `report.html` in a browser and use Print → Save as PDF — the report ships a print stylesheet for clean output.
 
 ---
 
 ## License
 
-MIT
+This project is licensed under the **MIT License** © 2026 Danil Grechishkin — see the [`LICENSE`](LICENSE) file for the full text.

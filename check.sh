@@ -21,6 +21,7 @@ SEMGREP_IMAGE="semgrep/semgrep:latest"
 TRIVY_IMAGE="aquasec/trivy:latest"
 HADOLINT_IMAGE="hadolint/hadolint:latest"
 GRYPE_IMAGE="anchore/grype:latest"
+SYFT_IMAGE="anchore/syft:v1.45.1@sha256:c6d5719f48f5a5986acf2847eb1ed7c53176e712d5721fcd156184cfb262f6eb"  # digest-pinned (manifest-list digest)
 VT_IMAGE_LOCAL="vt-cli:local"      # built locally from Dockerfile.vt
 
 # ── Global state ──────────────────────────────────────────────────────────────
@@ -33,11 +34,8 @@ LOG_DIR=""
 VT_CFG_DIR=""
 VT_API_KEY="${VT_API_KEY:-}"
 LANG_REPORT="${LANG_REPORT:-en}"     # Report language: en | ru
-PDF_IMAGE_LOCAL="weasyprint-pdf:local"  # built locally from Dockerfile.pdf
 
 REPORT_GENERATED=false
-PDF_GENERATED=false
-GENERATE_PDF=false
 OUTPUT_FORMAT=""
 
 # Result variables (set by each scanner)
@@ -86,7 +84,7 @@ ${BOLD}Options:${NC}
   --no-vt         Skip VirusTotal scan
   --no-hadolint   Skip Hadolint Dockerfile scan
   --no-grype      Skip Grype scan
-  --pdf           Also generate PDF report (requires Docker + Dockerfile.pdf)
+  --no-sbom       Skip SBOM (Syft) generation; Grype uses directory mode
   --vt-key KEY    VirusTotal API key (overrides VT_API_KEY env)
   --lang LANG     Report language: en (default) or ru
   --semgrep-min-severity LEVEL  Minimum severity to show: info|low|medium|high (default: medium)
@@ -721,27 +719,82 @@ merge_vulns() {
   log_ok "vulns_merged.json written"
 }
 
+# ── Syft (SBOM) ───────────────────────────────────────────────────────────────
+# Catalogs the source tree into an SBOM (syft-json) that Grype consumes via sbom:
+# mode. Does NOT set any GRYPE_*/TRIVY_* global — success/failure is detected by the
+# caller (run_grype) via exit code AND [[ -s sbom.syft.json ]] (D-02). Bash 3.2 safe.
+run_syft() {
+  log_section "Syft — SBOM Generation"
+
+  local out="$RAW_DIR/sbom.syft.json"
+  local syft_timeout=300  # 5 min
+
+  log_info "Running Syft (timeout ${syft_timeout}s)…"
+  local ec=0
+  timeout "$syft_timeout" docker run --rm \
+    -v "$WORK_DIR/source:/target:ro" \
+    -v "$RAW_DIR:/reports" \
+    "$SYFT_IMAGE" \
+    dir:/target \
+      -o syft-json=/reports/sbom.syft.json \
+      --quiet 2>/dev/null || ec=$?
+  if [[ $ec -ne 0 ]]; then
+    if [[ $ec -eq 124 ]]; then
+      log_warn "Syft timed out after ${syft_timeout}s"
+    else
+      log_warn "Syft exited with code $ec"
+    fi
+  fi
+}
+
 # ── Grype ─────────────────────────────────────────────────────────────────────
 run_grype() {
   log_section "Grype — CVE Scan"
 
+  # D-05: --no-grype skips the Grype scan entirely while the SBOM is still produced
+  # (run_syft runs independently in wrapper_grype). Leave GRYPE_STATUS="skipped".
+  if [[ "$RUN_GRYPE" != true ]]; then
+    log_info "Grype scan skipped (--no-grype); SBOM still generated"
+    GRYPE_STATUS="skipped"
+    return
+  fi
+
   local out="$RAW_DIR/grype.json"
   local grype_timeout=600  # 10 min
+  local sbom="$RAW_DIR/sbom.syft.json"
 
   log_info "Ensuring grype-db-cache volume exists…"
   docker volume create grype-db-cache 2>/dev/null || true
 
   log_info "Running Grype (timeout ${grype_timeout}s)…"
   local ec=0
-  timeout "$grype_timeout" docker run --rm \
-    -v "$WORK_DIR/source:/target:ro" \
-    -v "$RAW_DIR:/reports" \
-    -v "grype-db-cache:/root/.cache/grype/db" \
-    "$GRYPE_IMAGE" \
-    dir:/target \
-      --output json \
-      --file /reports/grype.json \
-      --quiet 2>/dev/null || ec=$?
+  if [[ "$RUN_SBOM" == true && -s "$sbom" ]]; then
+    # SBOM present & non-empty → consume it (D-03: an empty-but-valid SBOM is trusted,
+    # it drives Grype to 0 matches → GRYPE-04 inconclusive; no "0 artifacts" fallback).
+    # sbom: mode reads the SBOM by path, so the source mount is unnecessary here.
+    timeout "$grype_timeout" docker run --rm \
+      -v "$RAW_DIR:/reports" \
+      -v "grype-db-cache:/root/.cache/grype/db" \
+      "$GRYPE_IMAGE" \
+      sbom:/reports/sbom.syft.json \
+        --output json \
+        --file /reports/grype.json \
+        --quiet 2>/dev/null || ec=$?
+  else
+    # D-02: RUN_SBOM=true but the SBOM is missing/empty → Syft failed/timed out → warn
+    # and fall back to dir mode so a Syft failure never costs Grype its coverage.
+    # RUN_SBOM=false (--no-sbom) → dir mode silently (expected, not a failure).
+    [[ "$RUN_SBOM" == true ]] && log_warn "Syft SBOM unavailable — Grype falling back to directory mode"
+    timeout "$grype_timeout" docker run --rm \
+      -v "$WORK_DIR/source:/target:ro" \
+      -v "$RAW_DIR:/reports" \
+      -v "grype-db-cache:/root/.cache/grype/db" \
+      "$GRYPE_IMAGE" \
+      dir:/target \
+        --output json \
+        --file /reports/grype.json \
+        --quiet 2>/dev/null || ec=$?
+  fi
   if [[ $ec -ne 0 ]]; then
     if [[ $ec -eq 124 ]]; then
       log_warn "Grype timed out after ${grype_timeout}s"
@@ -762,9 +815,18 @@ run_grype() {
   GRYPE_MEDIUM=$(jq   '[.matches[]?.vulnerability | select(.severity=="Medium")]   | length' "$out" 2>/dev/null || echo 0)
   GRYPE_LOW=$(jq      '[.matches[]?.vulnerability | select(.severity=="Low")]      | length' "$out" 2>/dev/null || echo 0)
 
-  # GRYPE-03 diagnostics: package proxy count, DB age, manifest detection
-  GRYPE_PKG_COUNT=$(jq '[.matches[]?.artifact | {name, version}] | unique | length' \
-    "$out" 2>/dev/null || echo 0)
+  # GRYPE-03 diagnostics: package count (D-04 catalog when SBOM present, else proxy), DB age, manifests
+  local pkg_count_src
+  if [[ -s "$RAW_DIR/sbom.syft.json" ]]; then
+    # D-04: authoritative cataloged-package count from the SBOM (supersedes the proxy).
+    GRYPE_PKG_COUNT=$(jq '.artifacts | length' "$RAW_DIR/sbom.syft.json" 2>/dev/null || echo 0)
+    pkg_count_src="sbom_catalog"
+  else
+    # No SBOM (--no-sbom or Syft failure) → fall back to the phase-16 vulnerable-only proxy.
+    GRYPE_PKG_COUNT=$(jq '[.matches[]?.artifact | {name, version}] | unique | length' \
+      "$out" 2>/dev/null || echo 0)
+    pkg_count_src="match_proxy"
+  fi
   GRYPE_DB_AGE_DAYS=$(jq -r '
     if (.descriptor.db.status.built // null) != null then
       (.descriptor.db.status.built | fromdateiso8601) as $built |
@@ -778,7 +840,7 @@ run_grype() {
   else
     DEP_MANIFESTS_PRESENT=false
   fi
-  log_info "Grype diagnostics — matches: $GRYPE_CRITICAL+$GRYPE_HIGH+$GRYPE_MEDIUM+$GRYPE_LOW  pkg_proxy: $GRYPE_PKG_COUNT  db_age_days: $GRYPE_DB_AGE_DAYS  manifests: $DEP_MANIFESTS_PRESENT"
+  log_info "Grype diagnostics — matches: $GRYPE_CRITICAL+$GRYPE_HIGH+$GRYPE_MEDIUM+$GRYPE_LOW  pkg_count: $GRYPE_PKG_COUNT ($pkg_count_src)  db_age_days: $GRYPE_DB_AGE_DAYS  manifests: $DEP_MANIFESTS_PRESENT"
 
   echo -e "  Vulnerabilities — ${RED}CRITICAL: $GRYPE_CRITICAL${NC}  ${YELLOW}HIGH: $GRYPE_HIGH${NC}  MEDIUM: $GRYPE_MEDIUM  LOW: $GRYPE_LOW"
 
@@ -1117,6 +1179,9 @@ wrapper_grype() {
   local log="$LOG_DIR/grype-run.log"
   local env_file="$LOG_DIR/grype.env"
 
+  # D-01: Syft → Grype as a single sequential sub-chain under the SAME PID_GRYPE.
+  # No PID_SYFT, no extra barrier. RUN_SBOM gates Syft (D-05 decoupled from RUN_GRYPE).
+  [[ "$RUN_SBOM" == true ]] && { run_syft; } >> "$log" 2>&1
   { run_grype; } >> "$log" 2>&1
 
   printf 'GRYPE_STATUS=%s\n'   "$GRYPE_STATUS"   > "$env_file"
@@ -1413,6 +1478,12 @@ build_report_json() {
     dep_warning="manifests-present-zero-packages"
   fi
 
+  # ── SBOM-03: presence flag for the SBOM (sbom.syft.json) download link. true only when
+  # plan 18-01 actually produced a non-empty SBOM (RUN_SBOM=true && Syft succeeded);
+  # absent (not broken) under --no-sbom because the renderer gates the link on this.
+  local sbom_present=false
+  [[ -s "$RAW_DIR/sbom.syft.json" ]] && sbom_present=true
+
   # ── Final jq -n: assemble and write report.json (all values via --arg/--argjson — DATA-02)
   jq -n \
     --arg  schema_version  "1" \
@@ -1444,6 +1515,7 @@ build_report_json() {
     --argjson dep_src_grype  "${TOTAL_GRYPE:-0}" \
     --argjson dep_src_merged "${TOTAL_MERGED:-0}" \
     --arg  dep_warning       "$dep_warning" \
+    --argjson sbom_present   "$sbom_present" \
     --arg  hado_status     "$HADOLINT_STATUS" \
     --argjson hado_findings   "$hadolint_findings" \
     '{
@@ -1467,7 +1539,8 @@ build_report_json() {
         dependencies: (if $dep_status == "skipped" then {status: "skipped"}
                        elif $dep_status == "error" then {status: "error"}
                        else {status: $dep_status, vulns: $dep_vulns, secrets: $dep_secrets,
-                             sources: {trivy: $dep_src_trivy, grype: $dep_src_grype, merged: $dep_src_merged}}
+                             sources: {trivy: $dep_src_trivy, grype: $dep_src_grype, merged: $dep_src_merged},
+                             sbom_present: $sbom_present}
                              + (if $dep_warning != "" then {warning: $dep_warning} else {} end)
                        end),
         hadolint: (if ($hado_status == "skipped" or $hado_status == "skipped_no_docker")
@@ -1616,6 +1689,7 @@ setup_lang() {
     T_DEP_ARTIFACT_MERGED="⤓ vulns_merged.json"
     T_DEP_ARTIFACT_TRIVY="⤓ trivy_fs.json"
     T_DEP_ARTIFACT_GRYPE="⤓ grype.json"
+    T_DEP_ARTIFACT_SBOM="⤓ sbom.syft.json"
     T_BADGE_INCONCLUSIVE="НЕ ОПРЕДЕЛЕНО"
     T_DEP_WARN_HEAD="Манифесты найдены — пакеты не определены"
     T_DEP_WARN_BODY="Файлы зависимостей найдены, но ни один сканер не определил пакеты — вероятно, отсутствует lockfile. Результаты не определены и не могут считаться успешным прохождением проверки."
@@ -1782,6 +1856,7 @@ setup_lang() {
     T_DEP_ARTIFACT_MERGED="⤓ vulns_merged.json"
     T_DEP_ARTIFACT_TRIVY="⤓ trivy_fs.json"
     T_DEP_ARTIFACT_GRYPE="⤓ grype.json"
+    T_DEP_ARTIFACT_SBOM="⤓ sbom.syft.json"
     T_BADGE_INCONCLUSIVE="INCONCLUSIVE"
     T_DEP_WARN_HEAD="Manifests found — 0 packages cataloged"
     T_DEP_WARN_BODY="Dependency manifests are present but neither scanner cataloged any packages — likely a missing lockfile. Results are inconclusive and must not be read as a clean pass."
@@ -1891,6 +1966,7 @@ build_lang_dict() {
     --arg dep_artifact_merged     "$T_DEP_ARTIFACT_MERGED" \
     --arg dep_artifact_trivy      "$T_DEP_ARTIFACT_TRIVY" \
     --arg dep_artifact_grype      "$T_DEP_ARTIFACT_GRYPE" \
+    --arg dep_artifact_sbom       "$T_DEP_ARTIFACT_SBOM" \
     --arg badge_inconclusive      "$T_BADGE_INCONCLUSIVE" \
     --arg dep_warn_head           "$T_DEP_WARN_HEAD" \
     --arg dep_warn_body           "$T_DEP_WARN_BODY" \
@@ -1998,6 +2074,7 @@ build_lang_dict() {
       dep_artifact_merged:     $dep_artifact_merged,
       dep_artifact_trivy:      $dep_artifact_trivy,
       dep_artifact_grype:      $dep_artifact_grype,
+      dep_artifact_sbom:       $dep_artifact_sbom,
       badge_inconclusive:      $badge_inconclusive,
       dep_warn_head:           $dep_warn_head,
       dep_warn_body:           $dep_warn_body,
@@ -2041,38 +2118,6 @@ build_lang_dict() {
       load_error_prefix:       $load_error_prefix,
       footer_generated:        $footer_generated
     }'
-}
-
-# ── PDF Report ─────────────────────────────────────────────────────────────────
-ensure_pdf_image() {
-  if docker image inspect "$PDF_IMAGE_LOCAL" &>/dev/null 2>&1; then
-    return
-  fi
-  local dockerfile
-  dockerfile="$(dirname "$0")/docker/Dockerfile.pdf"
-  if [[ ! -f "$dockerfile" ]]; then
-    log_warn "Dockerfile.pdf not found — skipping PDF"
-    return 1
-  fi
-  log_info "Building WeasyPrint image (first run, ~2–3 min)…"
-  docker build -t "$PDF_IMAGE_LOCAL" -f "$dockerfile" "$(dirname "$0")" \
-    2>&1 | grep -E 'Step|error|Error|=>|DONE' || true
-  if ! docker image inspect "$PDF_IMAGE_LOCAL" &>/dev/null; then
-    log_warn "WeasyPrint image build failed — see output above"
-    return 1
-  fi
-  log_ok "WeasyPrint image built: $PDF_IMAGE_LOCAL"
-}
-
-generate_pdf() {
-  [[ "$PDF_GENERATED" == true ]] && return
-  PDF_GENERATED=true
-  # PDF-01: WeasyPrint cannot execute JavaScript, so it produces a blank page with the new
-  # interactive dashboard. PDF generation is deferred to a future milestone (PDF-FUTURE).
-  # See .planning/ROADMAP.md for the PDF redesign tracking item.
-  log_warn "PDF is not supported with the new interactive dashboard."
-  log_warn "Open the HTML report in a browser: file://$REPORT_DIR/report.html"
-  return 0
 }
 
 # ── Apply per-repo config suppressions (post-merge, pre-risk-score) ──────────
@@ -3358,6 +3403,15 @@ generate_report() {
       aGrype.rel = 'noopener noreferrer';
       aGrype.textContent = L.dep_artifact_grype || '⤓ grype.json';
       rawA.appendChild(aGrype);
+      var depSbom = D.scanners && D.scanners.dependencies && D.scanners.dependencies.sbom_present;
+      if (depSbom) {
+        var aSbom = el_('a', '');
+        aSbom.href = 'raw/sbom.syft.json';
+        aSbom.target = '_blank';
+        aSbom.rel = 'noopener noreferrer';
+        aSbom.textContent = L.dep_artifact_sbom || '⤓ sbom.syft.json';
+        rawA.appendChild(aSbom);
+      }
       body.appendChild(rawA);
       return;
     }
@@ -3510,6 +3564,15 @@ generate_report() {
         aGrype2.rel = 'noopener noreferrer';
         aGrype2.textContent = L.dep_artifact_grype || '⤓ grype.json';
         rawA2.appendChild(aGrype2);
+        var depSbom = D.scanners && D.scanners.dependencies && D.scanners.dependencies.sbom_present;
+        if (depSbom) {
+          var aSbom2 = el_('a', '');
+          aSbom2.href = 'raw/sbom.syft.json';
+          aSbom2.target = '_blank';
+          aSbom2.rel = 'noopener noreferrer';
+          aSbom2.textContent = L.dep_artifact_sbom || '⤓ sbom.syft.json';
+          rawA2.appendChild(aSbom2);
+        }
         body.appendChild(rawA2);
       }
       return;
@@ -4222,8 +4285,7 @@ main() {
   fi
 
   # 2. Parse CLI flags (highest precedence — override .env)
-  GENERATE_PDF=false
-  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true RUN_GRYPE=true
+  local RUN_SEMGREP=true RUN_TRIVY=true RUN_VT=true RUN_HADOLINT=true RUN_GRYPE=true RUN_SBOM=true
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --release)
@@ -4238,7 +4300,7 @@ main() {
       --no-vt)        RUN_VT=false ;;
       --no-hadolint)  RUN_HADOLINT=false ;;
       --no-grype)     RUN_GRYPE=false ;;
-      --pdf)          GENERATE_PDF=true ;;
+      --no-sbom)      RUN_SBOM=false ;;
       --vt-key)
         [[ $# -lt 2 ]] && { log_error "--vt-key requires a value"; exit 1; }
         VT_API_KEY="$2"; shift ;;
@@ -4285,7 +4347,6 @@ main() {
         [[ -n "$_p" ]] && kill "$_p" 2>/dev/null || true
       done
       generate_report 2>/dev/null || true
-      [[ "$GENERATE_PDF" == true ]] && generate_pdf 2>/dev/null || true
       cleanup
     ' EXIT
 
@@ -4303,8 +4364,9 @@ main() {
     PID_SEMGREP=""; PID_TRIVY=""; PID_GRYPE=""; PID_VT=""; PID_HADOLINT=""
 
     # Fire Trivy + Grype first (paired sub-group per D-02); braces form captures correct PID.
+    # D-05: wrapper_grype also hosts run_syft, so launch it when Grype OR the SBOM is wanted.
     [[ "$RUN_TRIVY"    == true ]] && { wrapper_trivy & PID_TRIVY=$!; }
-    [[ "$RUN_GRYPE"    == true ]] && { wrapper_grype & PID_GRYPE=$!; }
+    { [[ "$RUN_GRYPE" == true ]] || [[ "$RUN_SBOM" == true ]]; } && { wrapper_grype & PID_GRYPE=$!; }
 
     # Fire remaining three simultaneously.
     [[ "$RUN_SEMGREP"  == true ]] && { wrapper_semgrep & PID_SEMGREP=$!; }
@@ -4379,7 +4441,6 @@ main() {
         [[ -n "$_p" ]] && kill "$_p" 2>/dev/null || true
       done
       generate_report 2>/dev/null || true
-      [[ "$GENERATE_PDF" == true ]] && generate_pdf 2>/dev/null || true
       cleanup
     ' EXIT
 
@@ -4410,7 +4471,6 @@ main() {
   compare_findings      # computes diff globals if --compare was given
 
   generate_report
-  [[ "$GENERATE_PDF" == true ]] && generate_pdf
   [[ "$OUTPUT_FORMAT" == "json" ]] && build_json_summary
 
   local overall
@@ -4424,7 +4484,6 @@ main() {
   echo -e "  Hadolint    : $(term_badge "$HADOLINT_STATUS")  files=$HADOLINT_FILES  errors=$HADOLINT_ERRORS  warnings=$HADOLINT_WARNINGS"
   echo ""
   echo -e "  ${BOLD}HTML:${NC} file://$REPORT_DIR/report.html"
-  [[ "$GENERATE_PDF" == true && -f "$REPORT_DIR/report.pdf" ]] && echo -e "  ${BOLD}PDF :${NC} file://$REPORT_DIR/report.pdf"
   echo ""
 }
 
